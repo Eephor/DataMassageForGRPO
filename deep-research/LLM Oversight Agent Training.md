@@ -51,9 +51,6 @@ Therefore, the mathematically and structurally superior methodology is to strict
 
 By defining a singular target, you create a stable reference frame for the policy optimizer. The model can focus its internal cognitive steps entirely on the utterances of that specific agent, and the subsequent reward function can accurately correlate the model's analytical output with the final ground-truth label for that specific agent. If a thread contains three interesting bots, that single thread should be duplicated in the dataset three times, each time altering the system prompt to instruct the oversight model to focus on a different target participant.
 
-Gemini said
-This restructured format uses Markdown headers for hierarchy, Mermaid syntax for the visual flow, and JSON code blocks to maintain data integrity. This makes it easy to integrate into a README or documentation file.
-
 Data Stratification and GRPO Prompt Engineering Pipeline
 Raw multi-agent interaction logs must be parsed to isolate individual evaluation targets. The entire conversation serves as the contextual user input, while the system prompt dictates the specific trait (e.g., deceptiveness) and target agent the oversight model must analyze.
 
