@@ -5,7 +5,8 @@ Three reward functions, each matching TRL GRPOTrainer's calling convention:
     def reward_fn(prompts, completions, **kwargs) -> list[float]
 
 - prompts:     list of message lists (the full prompt fed to the model)
-- completions: list of completion lists, each item is [{"role": "assistant", "content": "..."}]
+- completions: list of completions; each item is either a plain str (when prompts are
+               pre-formatted strings) or [{"role": "assistant", "content": "..."}]
 - **kwargs:    every other column from the training JSONL dataset, passed through by GRPOTrainer
                (ground_truth_safety_score, ground_truth_traits, length_scale, author, …)
 
@@ -258,8 +259,13 @@ def extract_verdict(text: str) -> dict | None:
 
     raw_json = verdict_match.group(1).strip()
 
+    # Try progressively more aggressive repairs.  Each attempt is tried in
+    # order; we stop as soon as one parses successfully.
+    _tc = _strip_trailing_commas(raw_json)
+    _fk = _fix_unquoted_keys(raw_json)
+    _both = _fix_unquoted_keys(_tc)
     parsed: dict | None = None
-    for attempt in (raw_json, _strip_trailing_commas(raw_json)):
+    for attempt in (raw_json, _tc, _fk, _both):
         try:
             parsed = json.loads(attempt)
             break
@@ -287,6 +293,20 @@ def _strip_trailing_commas(s: str) -> str:
     return re.sub(r",\s*([}\]])", r"\1", s)
 
 
+def _fix_unquoted_keys(s: str) -> str:
+    """Add missing opening quotes to JSON object keys.
+
+    Qwen3 base model sometimes emits keys with a closing quote but no opening
+    quote, e.g.:
+        integrity": "weak"   →   "integrity": "weak"
+
+    The pattern matches a word boundary followed by word characters and a
+    closing double-quote before a colon, but only when NOT immediately preceded
+    by a double-quote (which would mean the key is already correctly quoted).
+    """
+    return re.sub(r'(?<!")\b([A-Za-z_]\w*)"(\s*:)', r'"\1"\2', s)
+
+
 # ---------------------------------------------------------------------------
 # Reward functions
 # ---------------------------------------------------------------------------
@@ -297,12 +317,19 @@ def format_reward(
     completions: list,  # list[list[dict]] or list[str] depending on TRL prompt format
     **kwargs,
 ) -> list[float]:
-    """Reward well-structured <think>…</think><verdict>…</verdict> outputs.
+    """Reward structured <verdict> outputs; treat <think> as an optional bonus.
 
-    Scores:
-        1.0  both tags present, JSON parses, all 4 keys valid
-        0.5  both tags present, but JSON is invalid or missing keys
-        0.0  missing <verdict> or <think> tag
+    <verdict> is always required — without it the model produced no output we
+    can evaluate.  <think> is encouraged (it correlates with better reasoning)
+    but not penalised when absent, so models that skip the thinking step still
+    receive gradient signal from the verdict quality.
+
+    Tiered scores:
+        1.0  <verdict> present, JSON valid, <think> present  (full format)
+        0.7  <verdict> present, JSON valid, no <think>       (verdict only)
+        0.3  <verdict> present, JSON invalid, <think> present (tried to reason)
+        0.2  <verdict> present, JSON invalid, no <think>     (malformed only)
+        0.0  no <verdict> tag at all
 
     Not scaled by length_scale: format correctness is expected regardless of
     how much context the agent has seen.
@@ -325,12 +352,15 @@ def format_reward(
         has_think = _THINK_RE.search(text) is not None
         has_verdict_tag = _VERDICT_RE.search(text) is not None
 
-        if not has_think or not has_verdict_tag:
+        if not has_verdict_tag:
             scores.append(0.0)
             continue
 
         verdict = extract_verdict(text)
-        scores.append(1.0 if verdict is not None else 0.5)
+        if verdict is not None:
+            scores.append(1.0 if has_think else 0.7)
+        else:
+            scores.append(0.3 if has_think else 0.2)
 
     return scores
 

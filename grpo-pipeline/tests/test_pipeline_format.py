@@ -19,6 +19,7 @@ import pytest
 
 from grpo_pipeline.rewards import (
     _completion_text,
+    _fix_unquoted_keys,
     extract_verdict,
     format_reward,
     group_reward,
@@ -250,22 +251,50 @@ class TestCompletionText:
 
 
 class TestFormatReward:
+    """Tiered scoring: <verdict> required; <think> is an optional bonus.
+
+    1.0  verdict + valid JSON + think
+    0.7  verdict + valid JSON, no think
+    0.3  verdict + invalid JSON + think
+    0.2  verdict + invalid JSON, no think
+    0.0  no verdict tag at all
+    """
+
     def _call(self, completions):
         return format_reward(prompts=["irrelevant"] * len(completions), completions=completions)
 
-    # -- string completions (pre-formatted prompt path: Qwen3 & Llama with our setup) --
+    # -- full format (both tags + valid JSON) --
 
-    def test_perfect_completion_string(self):
+    def test_full_format_string(self):
         scores = self._call([_GOOD_VERDICT])
         assert scores == [1.0]
 
-    def test_bad_json_inside_verdict_string(self):
-        scores = self._call([_BAD_JSON_VERDICT])
-        assert scores == [0.5]
+    def test_full_format_list_dict(self):
+        scores = self._call([[{"role": "assistant", "content": _GOOD_VERDICT}]])
+        assert scores == [1.0]
 
-    def test_missing_think_tag_string(self):
+    # -- verdict only (no think, valid JSON) → 0.7 --
+
+    def test_verdict_only_valid_json(self):
         scores = self._call([_MISSING_THINK])
-        assert scores == [0.0]
+        assert scores == [0.7]
+
+    # -- verdict + think, bad JSON → 0.3 --
+
+    def test_verdict_plus_think_bad_json(self):
+        scores = self._call([_BAD_JSON_VERDICT])
+        assert scores == [0.3]
+
+    # -- verdict only, bad JSON → 0.2 --
+
+    def test_verdict_only_bad_json(self):
+        verdict_no_think_bad_json = (
+            '<verdict>\nnot valid json\n</verdict>'
+        )
+        scores = self._call([verdict_no_think_bad_json])
+        assert scores == [0.2]
+
+    # -- no verdict at all → 0.0 --
 
     def test_missing_verdict_tag_string(self):
         scores = self._call([_MISSING_VERDICT_TAG])
@@ -275,26 +304,17 @@ class TestFormatReward:
         scores = self._call([""])
         assert scores == [0.0]
 
-    # -- list[dict] completions (message-dict path) --
-
-    def test_perfect_completion_list_dict(self):
-        scores = self._call([[{"role": "assistant", "content": _GOOD_VERDICT}]])
-        assert scores == [1.0]
-
-    def test_bad_json_list_dict(self):
-        scores = self._call([[{"role": "assistant", "content": _BAD_JSON_VERDICT}]])
-        assert scores == [0.5]
-
     def test_missing_verdict_list_dict(self):
-        scores = self._call([[{"role": "assistant", "content": _MISSING_THINK}]])
+        scores = self._call([[{"role": "assistant", "content": _MISSING_VERDICT_TAG}]])
         assert scores == [0.0]
 
-    # -- batch with mixed results --
+    # -- batch with all four outcomes --
 
-    def test_batch_mixed(self):
-        completions = [_GOOD_VERDICT, _MISSING_THINK, _BAD_JSON_VERDICT, ""]
-        scores = format_reward(prompts=["x"] * 4, completions=completions)
-        assert scores == [1.0, 0.0, 0.5, 0.0]
+    def test_batch_all_tiers(self):
+        verdict_only_bad = '<verdict>\nnot valid json\n</verdict>'
+        completions = [_GOOD_VERDICT, _MISSING_THINK, _BAD_JSON_VERDICT, verdict_only_bad, ""]
+        scores = format_reward(prompts=["x"] * 5, completions=completions)
+        assert scores == [1.0, 0.7, 0.3, 0.2, 0.0]
 
     def test_returns_list_same_length(self):
         n = 6
@@ -478,6 +498,36 @@ class TestTraitsToGroupLabel:
 
 
 # ---------------------------------------------------------------------------
+# _fix_unquoted_keys: JSON key repair
+# ---------------------------------------------------------------------------
+
+
+class TestFixUnquotedKeys:
+    def test_fixes_single_unquoted_key(self):
+        broken = '{"safety_level": "risk",\n  integrity": "weak"}'
+        fixed = _fix_unquoted_keys(broken)
+        assert '"integrity"' in fixed
+        assert 'integrity":' not in fixed.replace('"integrity":', "")
+
+    def test_leaves_correctly_quoted_keys_alone(self):
+        good = '{"safety_level": "safe", "integrity": "strong"}'
+        assert _fix_unquoted_keys(good) == good
+
+    def test_fixes_multiple_unquoted_keys(self):
+        broken = '{safety_level": "risk", integrity": "weak", reasoning": "poor"}'
+        fixed = _fix_unquoted_keys(broken)
+        import json
+        parsed = json.loads(fixed)
+        assert parsed["safety_level"] == "risk"
+        assert parsed["integrity"] == "weak"
+        assert parsed["reasoning"] == "poor"
+
+    def test_idempotent_on_valid_json(self):
+        good = '{"safety_level": "safe", "integrity": "strong", "reasoning": "good", "empathy": "weak"}'
+        assert _fix_unquoted_keys(good) == good
+
+
+# ---------------------------------------------------------------------------
 # extract_verdict: JSON parsing edge cases
 # ---------------------------------------------------------------------------
 
@@ -500,6 +550,29 @@ class TestExtractVerdict:
         v = extract_verdict(text)
         assert v is not None
         assert v["safety_level"] == "risk"
+
+    def test_unquoted_key_repaired(self):
+        """Handles Qwen3 base model's common output error: missing opening quote on key."""
+        text = (
+            "<think>r</think>\n<verdict>\n"
+            '{\n  "safety_level": "risk",\n  integrity": "weak",\n'
+            '  "reasoning": "poor",\n  "empathy": "weak"\n}\n</verdict>'
+        )
+        v = extract_verdict(text)
+        assert v is not None, "extract_verdict should repair the unquoted key"
+        assert v["integrity"] == "weak"
+        assert v["safety_level"] == "risk"
+
+    def test_unquoted_key_plus_trailing_comma(self):
+        """Both repairs applied together."""
+        text = (
+            "<verdict>\n"
+            '{\n  "safety_level": "safe",\n  integrity": "strong",\n'
+            '  "reasoning": "good",\n  "empathy": "good",\n}\n</verdict>'
+        )
+        v = extract_verdict(text)
+        assert v is not None
+        assert v["integrity"] == "strong"
 
     def test_invalid_safety_level_returns_none(self):
         text = (
