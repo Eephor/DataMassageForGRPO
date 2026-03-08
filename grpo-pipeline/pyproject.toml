@@ -29,6 +29,15 @@ train = [
     "torch>=2.0",
     "peft>=0.10",
 ]
+# LLM-powered participant bots and oracle evaluator.
+# All SDK packages are lazy-imported; installing this extra is only needed when
+# --use-llm-bots is set in train.py or USE_LLM_BOTS=True in the notebook.
+# Ollama uses plain requests (already available) and needs no extra install.
+llm-bots = [
+    "anthropic>=0.50",
+    "openai>=1.60",
+    "google-generativeai>=0.8",
+]
 
 [dependency-groups]
 dev = [

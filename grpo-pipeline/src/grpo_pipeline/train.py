@@ -76,6 +76,16 @@ Usage
         --output-dir ../lora-adapter \\
         --min-context-turns 1
 
+    # LLM bot mode (requires bot profiles + API key — costs money)
+    python -m grpo_pipeline.build_profiles --input ../raw-data --output ../bot-profiles
+    python -m grpo_pipeline.train \\
+        --raw-data-dir ../raw-data \\
+        --use-llm-bots \\
+        --bot-profiles-dir ../bot-profiles \\
+        --participant-backend claude --participant-model claude-sonnet-4-5 \\
+        --oracle-backend claude --oracle-model claude-sonnet-4-5 \\
+        --min-context-turns 1
+
     # With SFT warmup and HuggingFace push
     python -m grpo_pipeline.train \\
         --model unsloth/Llama-3.2-3B-Instruct \\
@@ -348,6 +358,63 @@ def main(
             ),
         ),
     ] = 0,
+    use_llm_bots: Annotated[
+        bool,
+        typer.Option(
+            "--use-llm-bots/--no-use-llm-bots",
+            help=(
+                "Enable LLM-powered participant bots. Requires --raw-data-dir and "
+                "--bot-profiles-dir. Each thread's author ordering is reused as a "
+                "turn-schedule template while new content is generated via the configured "
+                "LLM backend. Incurs API costs on every training step."
+            ),
+        ),
+    ] = False,
+    bot_profiles_dir: Annotated[
+        Path | None,
+        typer.Option(
+            "--bot-profiles-dir",
+            help=(
+                "Directory containing {author}.json BotProfile files produced by the "
+                "build_profiles CLI. Required when --use-llm-bots is set. "
+                "Default: ../bot-profiles"
+            ),
+        ),
+    ] = None,
+    participant_backend: Annotated[
+        str,
+        typer.Option(
+            "--participant-backend",
+            help="LLM backend for participant bots: 'claude', 'openai', 'gemini', or 'ollama'.",
+        ),
+    ] = "claude",
+    participant_model: Annotated[
+        str,
+        typer.Option(
+            "--participant-model",
+            help="Model identifier for the participant LLM backend (e.g. 'claude-sonnet-4-5').",
+        ),
+    ] = "claude-sonnet-4-5",
+    oracle_backend: Annotated[
+        str,
+        typer.Option(
+            "--oracle-backend",
+            help=(
+                "LLM backend for the oracle evaluator. Defaults to the same backend as "
+                "--participant-backend."
+            ),
+        ),
+    ] = "",
+    oracle_model: Annotated[
+        str,
+        typer.Option(
+            "--oracle-model",
+            help=(
+                "Model identifier for the oracle evaluator. Defaults to the same model as "
+                "--participant-model."
+            ),
+        ),
+    ] = "",
     output_dir: Annotated[
         Path,
         typer.Option("--output-dir", "-o", help="Directory to save the LoRA adapter."),
@@ -500,11 +567,21 @@ def main(
         lr_scheduler = "cosine"
         weight_decay = 0.1
 
-    data_source_label = (
-        f"live sim: {raw_data_dir}  (min_context_turns={min_context_turns})"
-        if raw_data_dir is not None
-        else str(train_file)
-    )
+    # Resolve oracle backend/model defaults (same as participant when not specified)
+    effective_oracle_backend = oracle_backend.strip() or participant_backend
+    effective_oracle_model = oracle_model.strip() or participant_model
+
+    if raw_data_dir is not None and use_llm_bots:
+        data_source_label = (
+            f"LLM bots: {raw_data_dir}  "
+            f"(participant={participant_backend}/{participant_model}, "
+            f"oracle={effective_oracle_backend}/{effective_oracle_model}, "
+            f"min_context_turns={min_context_turns})"
+        )
+    elif raw_data_dir is not None:
+        data_source_label = f"live sim: {raw_data_dir}  (min_context_turns={min_context_turns})"
+    else:
+        data_source_label = str(train_file)
 
     typer.echo(f"\n{'='*60}")
     typer.echo(f"  Moltbook Oversight Agent — GRPO Training")
@@ -572,7 +649,37 @@ def main(
             for a, p in zip(batch["author"], batch["prompt"])
         ]}
 
-    if raw_data_dir is not None:
+    if raw_data_dir is not None and use_llm_bots:
+        from grpo_pipeline.llm_bots import make_backend  # noqa: PLC0415
+        from grpo_pipeline.simulation import SimulatedDataset  # noqa: PLC0415
+
+        resolved_bot_profiles_dir = bot_profiles_dir or (raw_data_dir.parent / "bot-profiles")
+        typer.echo(f"LLM bot mode: streaming from {raw_data_dir} ...")
+        typer.echo(f"  bot_profiles_dir={resolved_bot_profiles_dir}")
+        typer.echo(f"  participant={participant_backend}/{participant_model}")
+        typer.echo(f"  oracle={effective_oracle_backend}/{effective_oracle_model}")
+        typer.echo(f"  min_context_turns={min_context_turns}")
+
+        p_backend = make_backend(participant_backend, participant_model)
+        o_backend = make_backend(effective_oracle_backend, effective_oracle_model)
+
+        raw_dataset = SimulatedDataset.create_with_llm_bots(
+            raw_data_dir=raw_data_dir,
+            bot_profiles_dir=resolved_bot_profiles_dir,
+            participant_backend=p_backend,
+            oracle_backend=o_backend,
+            min_context_turns=min_context_turns,
+        )
+        dataset = raw_dataset.map(format_prompts, batched=True)
+        typer.echo("  LLM bot streaming dataset ready (infinite generator, stopped by max_steps).")
+
+        # SFT warmup falls back to replay-mode single epoch for efficiency
+        raw_records = (
+            SimulatedDataset.collect_one_epoch(raw_data_dir, min_context_turns=0)
+            if warmup_examples > 0
+            else []
+        )
+    elif raw_data_dir is not None:
         from grpo_pipeline.simulation import SimulatedDataset  # noqa: PLC0415
 
         typer.echo(f"Live simulation mode: streaming from {raw_data_dir} ...")
