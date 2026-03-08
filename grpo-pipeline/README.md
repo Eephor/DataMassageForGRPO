@@ -10,10 +10,13 @@ src/grpo_pipeline/
 ├── transform.py  # Thread reconstruction + GRPO prompt formatting
 ├── split.py      # Thread-level train/test splitting (no leakage)
 ├── rewards.py    # GRPO reward functions + safe_apply_template helper
-├── train.py      # GRPO training script (Unsloth + TRL GRPOTrainer)
+├── train.py      # GRPO training script (Unsloth + TRL GRPOTrainer) — CLI entry point
 └── baseline.py   # Headless batch evaluation against test set
 train.ipynb       # Interactive training notebook (Colab)
 evaluate.ipynb    # Interactive notebook: single-record inspection + metrics table
+setup.sh          # One-command VM/bare-metal setup + optional training launch
+Dockerfile        # Container image (CUDA 12.4, PyTorch 2.6, Unsloth)
+docker-compose.yml# GPU-enabled compose service with volume mounts
 tests/
 ├── test_split.py            # Verifies no data leakage across splits
 └── test_pipeline_format.py  # Unit tests for template formatting and reward functions
@@ -39,7 +42,16 @@ uv run pytest tests/
 
 ### 2. Training (GPU required)
 
-Open `train.ipynb` in Google Colab, or run the CLI:
+Open `train.ipynb` in Google Colab, or run the CLI. For a bare-metal VM or Docker, see the dedicated sections below.
+
+**Quickest path on a local GPU machine:**
+
+```bash
+cd grpo-pipeline
+./setup.sh --train        # GPU detection, venv, deps, data pipeline, interactive model menu
+```
+
+**Manual steps:**
 
 ```bash
 # Step 1: install Unsloth + vLLM (platform-specific CUDA wheels, do this first)
@@ -49,10 +61,17 @@ pip install --no-deps trl==0.22.2
 # Step 2: install this package with training extras
 uv pip install -e ".[train]"
 
-# Step 3: train with GRPO (default: Llama-3.2-3B-Instruct, 16-bit LoRA)
+# Step 3: train with GRPO
+# If no --model flag is given, GRPO_MODEL env var is checked, then an interactive menu is shown.
+python -m grpo_pipeline.train \
+    --train-file ../transformed/train.jsonl \
+    --output-dir ../lora-adapter
+
+# Or specify the model explicitly (default: Llama-3.2-3B-Instruct, 16-bit LoRA):
 python -m grpo_pipeline.train \
     --train-file ../transformed/train.jsonl \
     --output-dir ../lora-adapter \
+    --model unsloth/Llama-3.2-3B-Instruct \
     --max-steps 500
 
 # Llama-3.2-1B-Instruct (FP8, free T4 — fastest prototyping):
@@ -215,6 +234,103 @@ Key per-mode differences automatically applied:
 | `save_method` | merged_16bit | merged_16bit | merged_16bit | **mxfp4** |
 
 Unsloth's `UNSLOTH_VLLM_STANDBY=1` (set automatically by `train.py`) enables sequential vLLM/train memory sharing — critical for fitting on T4.
+
+## VM / Bare-Metal Deployment
+
+`setup.sh` handles everything from a fresh Ubuntu + NVIDIA-driver machine to a running training job in one command.
+
+```bash
+# Clone the repo
+git clone https://github.com/Eephor/DataMassageForGRPO.git
+cd DataMassageForGRPO/grpo-pipeline
+
+# Full setup + interactive model menu + training:
+./setup.sh --train
+
+# Fully non-interactive (e.g. in a cloud VM startup script):
+GRPO_MODEL=unsloth/Llama-3.2-3B-Instruct ./setup.sh --train
+
+# Only install deps (no training yet):
+./setup.sh
+
+# Install deps, skip data pipeline (data already in ../transformed/), then train:
+./setup.sh --skip-data --model unsloth/Qwen3-8B --train
+```
+
+`setup.sh` performs in order:
+
+1. Checks Python 3.11+, NVIDIA driver, and `uv`
+2. Detects GPU — pins `vllm==0.9.2 triton==3.2.0` for T4; uses current versions for L4/A100
+3. Creates `.venv` with `uv` and activates it
+4. Installs `unsloth`, `vllm`, `triton`, and `trl==0.22.2`
+5. Installs the `grpo_pipeline` package in editable mode
+6. If `../raw-data/*.jsonl` exist and `../transformed/train.jsonl` is missing, runs `transform.py` + `split.py`
+7. If `--train` is passed, launches `python -m grpo_pipeline.train`
+
+Any extra flags after `--train` are forwarded to the training script (e.g. `--warmup-examples 60 --max-steps 300`).
+
+## Docker Deployment
+
+A self-contained training container based on `pytorch/pytorch:2.6.0-cuda12.4-cudnn9-devel` (CUDA 12.4, cuDNN 9, PyTorch 2.6).
+
+### Prerequisites
+
+- Docker ≥ 24 and Docker Compose ≥ 2.20
+- [NVIDIA Container Toolkit](https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/install-guide.html)
+
+Verify GPU access:
+
+```bash
+docker run --gpus all --rm nvidia/cuda:12.4.1-base-ubuntu22.04 nvidia-smi
+```
+
+### Build the image
+
+```bash
+cd grpo-pipeline
+docker build -t moltbook-grpo .
+```
+
+### Run with Docker Compose (recommended)
+
+```bash
+# Default model (Llama-3.2-3B-Instruct):
+docker compose up
+
+# Choose a different model via env var:
+GRPO_MODEL=unsloth/Llama-3.2-1B-Instruct docker compose up
+
+# With HuggingFace push:
+GRPO_MODEL=unsloth/Llama-3.2-3B-Instruct HF_TOKEN=hf_xxx HF_USERNAME=myorg \
+  docker compose run --rm train --push-to-hub --hf-username myorg
+
+# Prepare data first (if ../transformed/ is empty):
+docker compose run --rm prepare
+
+# Run training with extra flags:
+docker compose run --rm train --warmup-examples 60 --max-steps 300
+```
+
+Volume mounts (configured in `docker-compose.yml`):
+
+| Host path | Container path | Notes |
+|-----------|----------------|-------|
+| `../transformed` | `/data` | Training/test JSONL — read-only |
+| `../lora-adapter` | `/output` | LoRA adapter + merged model |
+| `~/.cache/huggingface` | `/root/.cache/huggingface` | Weight cache (avoids re-downloads) |
+
+### Run without Compose
+
+```bash
+docker run --gpus all --rm \
+  -e GRPO_MODEL=unsloth/Llama-3.2-3B-Instruct \
+  -e HF_TOKEN=$HF_TOKEN \
+  -v $(pwd)/../transformed:/data:ro \
+  -v $(pwd)/../lora-adapter:/output \
+  -v ~/.cache/huggingface:/root/.cache/huggingface \
+  moltbook-grpo \
+  --train-file /data/train.jsonl --output-dir /output
+```
 
 ## Data Sources
 

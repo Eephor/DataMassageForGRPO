@@ -1,0 +1,100 @@
+# Moltbook Oversight Agent — GRPO training via Docker Compose
+#
+# Quick start:
+#   GRPO_MODEL=unsloth/Llama-3.2-3B-Instruct docker compose up
+#
+# Model options (set GRPO_MODEL):
+#   unsloth/Llama-3.2-1B-Instruct      fp8  — T4 14 GB (free tier)
+#   unsloth/Qwen3-8B                   fp8  — L4 22 GB
+#   unsloth/DeepSeek-R1-0528-Qwen3-8B  4bit — L4/A100
+#   unsloth/Llama-3.2-3B-Instruct      16bit— T4/L4  [default]
+#   unsloth/gpt-oss-20b-BF16            bf16 — A100/H100 80 GB
+#
+# Prerequisites:
+#   - docker >= 24, docker compose >= 2.20
+#   - NVIDIA Container Toolkit (nvidia-docker2 or nvidia-container-toolkit)
+#     Verify: docker run --gpus all nvidia/cuda:12.4.1-base-ubuntu22.04 nvidia-smi
+#
+# Volumes (host paths are relative to the repository root, one level up from
+# this file which lives in grpo-pipeline/):
+#   ../transformed   → /data      training + test JSONL files (read-only)
+#   ../lora-adapter  → /output    LoRA adapter and merged model output
+#   ~/.cache/huggingface → /root/.cache/huggingface  weight cache (avoids re-download)
+#
+# Override any training flag via the `command:` block below or on the CLI:
+#   docker compose run --rm train --warmup-examples 60 --max-steps 300
+
+services:
+  train:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: moltbook-grpo:latest
+
+    # ── GPU access ────────────────────────────────────────────────────────────
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+
+    # ── Environment variables ─────────────────────────────────────────────────
+    environment:
+      # Model selection — resolution: GRPO_MODEL env var > interactive menu > default
+      - GRPO_MODEL=${GRPO_MODEL:-unsloth/Llama-3.2-3B-Instruct}
+      # Hugging Face token (optional — only needed for --push-to-hub)
+      - HF_TOKEN=${HF_TOKEN:-}
+      # Hugging Face username (optional — only needed for --push-to-hub)
+      - HF_USERNAME=${HF_USERNAME:-}
+      # Enable Unsloth sequential memory sharing (vLLM ↔ backward pass)
+      - UNSLOTH_VLLM_STANDBY=1
+      # Uncomment for verbose CUDA error attribution during debugging
+      # - CUDA_LAUNCH_BLOCKING=1
+
+    # ── Volume mounts ─────────────────────────────────────────────────────────
+    volumes:
+      # Training/test data — read-only so nothing in the container can corrupt it
+      - ../transformed:/data:ro
+      # LoRA adapter + merged model output — writable
+      - ../lora-adapter:/output
+      # HuggingFace model weight cache — prevents repeated large downloads
+      - ${HOME}/.cache/huggingface:/root/.cache/huggingface
+
+    # ── Default command ───────────────────────────────────────────────────────
+    # These are appended to the ENTRYPOINT defined in the Dockerfile.
+    # Override by passing flags after `docker compose run --rm train ...`
+    command: >
+      --train-file /data/train.jsonl
+      --output-dir /output
+
+    # Don't restart automatically — training failure should surface immediately
+    restart: "no"
+
+    # Human-readable container name
+    container_name: moltbook-grpo-train
+
+  # ── Optional: data preparation ───────────────────────────────────────────────
+  # Run this service first if your ../transformed directory is empty:
+  #   docker compose run --rm prepare
+  # It transforms raw JSONL files from ../raw-data and produces train/test splits.
+  prepare:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: moltbook-grpo:latest
+    volumes:
+      - ../raw-data:/raw-data:ro
+      - ../transformed:/transformed
+    entrypoint: ["bash", "-c"]
+    command: >
+      "python -m grpo_pipeline.transform --input /raw-data --output /transformed &&
+       python -m grpo_pipeline.split
+         --input /transformed/dataset.jsonl
+         --output /transformed
+         --test-ratio 0.2 --seed 42 &&
+       echo 'Data pipeline complete. Files in /transformed:' &&
+       ls /transformed"
+    restart: "no"
+    container_name: moltbook-grpo-prepare
