@@ -1,27 +1,36 @@
-"""GRPO training script for the Ethos Academy oversight agent.
+"""GRPO training script for the Moltbook oversight agent.
 
-Trains a causal LM to evaluate conversation-thread participants across 12
-behavioral traits using Group Relative Policy Optimization (GRPO).
+Trains a causal LM to evaluate conversation-thread participants using
+Group Relative Policy Optimization (GRPO) with a simplified 4-field categorical verdict.
 
 The reward signal has three components (see rewards.py for details):
-  1. format_reward    — structured <think>/<verdict> output
-  2. alignment_reward — correct alignment_status verdict
-  3. trait_reward     — accurate 12-trait scoring (weighted MAE)
+  1. format_reward        — structured <think>/<verdict> output
+  2. safety_level_reward  — correct safety-level bucket (class-weighted)
+  3. group_reward         — correct integrity / reasoning / empathy group labels (class-weighted)
 
 Rewards 2 and 3 are scaled by `length_scale` = (turn_index + 1) / total_turns,
 so early-turn judgments with little context contribute less to the gradient.
+Class weights compensate for the ~3.6:1 safe/non-safe dataset imbalance.
 
 Hardware targets
 ----------------
 Phase 1 — prototype (default model):
-    unsloth/Llama-3.2-1B-Instruct-FP8-Block
+    unsloth/Llama-3.2-1B-Instruct
     Free Colab T4 (16 GB) with UNSLOTH_VLLM_STANDBY=1
     max_seq_length=2048, num_generations=4, batch_size=4
 
 Phase 2 — scale up (pass --model):
-    unsloth/Qwen3-8B-FP8
+    unsloth/Qwen3-8B-Instruct
     Colab Pro L4 (22 GB) or RTX 3090/4090 (24 GB)
     Same script, same reward functions, no code changes
+
+Key alignment with Unsloth FP8 GRPO notebook
+--------------------------------------------
+- fast_inference=True + max_lora_rank + load_in_fp8=True passed to from_pretrained
+- lora_alpha = lora_rank * 2  (Unsloth 2x convergence recommendation)
+- lora_dropout / bias omitted (Unsloth applies its own optimised defaults)
+- random_state = 3407 (Unsloth canonical seed)
+- Saves both LoRA adapter and merged 16-bit model
 
 Prerequisites
 -------------
@@ -42,7 +51,7 @@ Usage
     python -m grpo_pipeline.train \\
         --train-file ../transformed/train.jsonl \\
         --output-dir ../lora-adapter-8b \\
-        --model unsloth/Qwen3-8B-FP8 \\
+        --model unsloth/Qwen3-8B-Instruct \\
         --max-steps 500
 """
 
@@ -145,11 +154,11 @@ def main(
             "-m",
             help=(
                 "Unsloth model identifier. "
-                "Phase 1 default: unsloth/Llama-3.2-1B-Instruct-FP8-Block (fits T4 16 GB). "
-                "Phase 2: unsloth/Qwen3-8B-FP8 (needs L4/A100 22+ GB)."
+                "Phase 1 default: unsloth/Llama-3.2-1B-Instruct (fits T4 16 GB). "
+                "Phase 2: unsloth/Qwen3-8B-Instruct (needs L4/A100 22+ GB)."
             ),
         ),
-    ] = "unsloth/Llama-3.2-1B-Instruct-FP8-Block",
+    ] = "unsloth/Llama-3.2-1B-Instruct",
     max_seq_length: Annotated[
         int,
         typer.Option("--max-seq-length", help="Maximum total sequence length (prompt + completion)."),
@@ -190,12 +199,12 @@ def main(
         typer.Option("--report-to", help="Logging backend: 'none', 'wandb', or 'tensorboard'."),
     ] = "none",
 ) -> None:
-    """Train the oversight agent with GRPO on Ethos Academy evaluation data."""
+    """Train the Moltbook oversight agent with GRPO on evaluation data."""
 
     FastLanguageModel, GRPOConfig, GRPOTrainer, Dataset = _import_training_deps()
 
     # Import reward functions after confirming deps are available
-    from grpo_pipeline.rewards import alignment_reward, format_reward, trait_reward  # noqa: PLC0415
+    from grpo_pipeline.rewards import format_reward, group_reward, safety_level_reward  # noqa: PLC0415
 
     # ------------------------------------------------------------------
     # 1. Load model + tokenizer
@@ -206,14 +215,16 @@ def main(
     loaded_model, tokenizer = FastLanguageModel.from_pretrained(
         model_name=model,
         max_seq_length=max_seq_length,
-        load_in_4bit=False,  # FP8 models use their own quantisation
-        dtype=None,          # auto-detect
+        load_in_4bit=False,      # FP8, not 4-bit
+        fast_inference=True,     # enable vLLM rollout engine for GRPO
+        max_lora_rank=lora_rank, # pre-allocate LoRA memory at load time
+        load_in_fp8=True,        # Float8 quantisation — halves VRAM vs bfloat16
     )
 
     # ------------------------------------------------------------------
     # 2. Apply LoRA adapter
     # ------------------------------------------------------------------
-    typer.echo(f"Applying LoRA (rank={lora_rank}) ...")
+    typer.echo(f"Applying LoRA (rank={lora_rank}, alpha={lora_rank * 2}) ...")
     loaded_model = FastLanguageModel.get_peft_model(
         loaded_model,
         r=lora_rank,
@@ -221,11 +232,10 @@ def main(
             "q_proj", "v_proj", "k_proj", "o_proj",
             "gate_proj", "up_proj", "down_proj",
         ],
-        lora_alpha=lora_rank,
-        lora_dropout=0.0,
-        bias="none",
+        lora_alpha=lora_rank * 2,          # 2x = faster convergence (Unsloth recommendation)
         use_gradient_checkpointing="unsloth",
-        random_state=42,
+        random_state=3407,                 # Unsloth canonical seed
+        # lora_dropout and bias intentionally omitted — Unsloth optimised defaults apply
     )
 
     # ------------------------------------------------------------------
@@ -283,7 +293,7 @@ def main(
     # 5. Create trainer and train
     # ------------------------------------------------------------------
     typer.echo("Creating GRPOTrainer ...")
-    typer.echo("  Reward functions: format_reward, alignment_reward, trait_reward")
+    typer.echo("  Reward functions: format_reward, safety_level_reward, group_reward")
     typer.echo(f"  num_generations={num_generations}, batch_size={batch_size}")
     typer.echo(f"  max_prompt_length={max_prompt_length}, max_completion_length={max_completion_length}")
 
@@ -291,9 +301,9 @@ def main(
         model=loaded_model,
         processing_class=tokenizer,
         reward_funcs=[
-            format_reward,
-            alignment_reward,
-            trait_reward,
+            format_reward,          # 1. structural format check (not length-scaled)
+            safety_level_reward,    # 2. correct safety-level bucket (class-weighted, length-scaled)
+            group_reward,           # 3. correct integrity/reasoning/empathy labels (class-weighted, length-scaled)
         ],
         args=training_args,
         train_dataset=dataset,
@@ -304,14 +314,21 @@ def main(
     trainer.train()
 
     # ------------------------------------------------------------------
-    # 6. Save LoRA adapter
+    # 6. Save LoRA adapter and merged 16-bit model
     # ------------------------------------------------------------------
     output_dir.mkdir(parents=True, exist_ok=True)
+    merged_dir = output_dir.parent / (output_dir.name + "-merged-16bit")
+
     typer.echo(f"Saving LoRA adapter to {output_dir} ...")
     loaded_model.save_pretrained(str(output_dir))
     tokenizer.save_pretrained(str(output_dir))
 
-    typer.echo(f"\nDone. LoRA adapter saved to: {output_dir}")
+    typer.echo(f"Saving merged 16-bit model to {merged_dir} ...")
+    loaded_model.save_pretrained_merged(str(merged_dir), tokenizer, save_method="merged_16bit")
+
+    typer.echo(f"\nDone.")
+    typer.echo(f"  LoRA adapter:      {output_dir}")
+    typer.echo(f"  Merged 16-bit:     {merged_dir}")
     typer.echo("To evaluate, run:")
     typer.echo(f"  python -m grpo_pipeline.baseline --test-file ../transformed/test.jsonl --lora-adapter {output_dir}")
 
