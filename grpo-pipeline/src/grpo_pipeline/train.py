@@ -103,6 +103,19 @@ from __future__ import annotations
 import os
 import sys
 
+# Load .env from the current working directory (or any parent) when python-dotenv
+# is installed.  This makes `uv run python -m grpo_pipeline.train` pick up API
+# keys and GRPO_MODEL without manual `export` calls.  The package is optional —
+# script execution is unaffected when it is not installed (Docker, CI, etc. manage
+# env vars themselves).  override=False ensures already-exported variables win,
+# which keeps the Docker / shell-export workflow behaving as before.
+try:
+    from dotenv import load_dotenv  # noqa: PLC0415
+
+    load_dotenv(override=False)
+except ImportError:
+    pass
+
 # MUST be set before importing unsloth / vllm — enables sequential memory sharing
 # so the vLLM inference engine and the training backward pass never compete for
 # GPU memory at the same time (critical for running on T4 16 GB).

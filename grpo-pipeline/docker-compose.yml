@@ -41,13 +41,24 @@ services:
               capabilities: [gpu]
 
     # ── Environment variables ─────────────────────────────────────────────────
+    # All variables are sourced from .env (copy from .env.example and fill in).
+    env_file:
+      - path: .env
+        required: false   # training still works without .env (uses inline defaults below)
     environment:
       # Model selection — resolution: GRPO_MODEL env var > interactive menu > default
       - GRPO_MODEL=${GRPO_MODEL:-unsloth/Llama-3.2-3B-Instruct}
-      # Hugging Face token (optional — only needed for --push-to-hub)
+      # Hugging Face (optional — only needed for --push-to-hub)
       - HF_TOKEN=${HF_TOKEN:-}
-      # Hugging Face username (optional — only needed for --push-to-hub)
       - HF_USERNAME=${HF_USERNAME:-}
+      # LLM Bot Mode API keys (optional — only needed when --use-llm-bots is set)
+      - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY:-}
+      - OPENAI_API_KEY=${OPENAI_API_KEY:-}
+      - GOOGLE_API_KEY=${GOOGLE_API_KEY:-}
+      # Weights & Biases (optional — only needed when --report-to wandb)
+      - WANDB_API_KEY=${WANDB_API_KEY:-}
+      - WANDB_PROJECT=${WANDB_PROJECT:-moltbook-oversight}
+      - WANDB_ENTITY=${WANDB_ENTITY:-}
       # Enable Unsloth sequential memory sharing (vLLM ↔ backward pass)
       - UNSLOTH_VLLM_STANDBY=1
       # Uncomment for verbose CUDA error attribution during debugging
