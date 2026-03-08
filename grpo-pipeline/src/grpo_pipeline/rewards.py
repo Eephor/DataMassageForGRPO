@@ -117,19 +117,27 @@ _VERDICT_RE = re.compile(r"<verdict>(.*?)</verdict>", re.DOTALL)
 
 
 def safe_apply_template(tokenizer, msgs: list[dict], **kwargs) -> str:
-    """Model-agnostic chat-template wrapper (Llama + Qwen3 + future models).
+    """Model-agnostic chat-template wrapper (Llama + Qwen3 + GPT-OSS + future models).
 
-    Qwen3's default template appends '<think>\\n' to the generation prompt
-    (thinking mode), so the model's completion starts INSIDE a <think> block —
-    the opening tag is in the prompt, not the completion — and format_reward
-    returns 0.0 for every step.
+    Handles two model-specific template quirks automatically:
 
-    We detect thinking-mode support by inspecting the Jinja template string
-    rather than catching TypeError, so this works for any future model that
-    adds 'enable_thinking' to its template without a name-based allowlist.
+    1. Qwen3 thinking mode — the default template appends '<think>\\n' to the
+       generation prompt so the completion starts INSIDE a <think> block.
+       Our reward parser never sees the tag → format_reward returns 0.0.
+       Fix: inject enable_thinking=False when the template supports it.
+
+    2. GPT-OSS reasoning_effort — the gpt-oss chat template accepts a
+       'reasoning_effort' kwarg ('low'/'medium'/'high'). Without 'low', the
+       model generates very long internal reasoning blocks that bloat prompts.
+       Fix: inject reasoning_effort='low' when the template supports it.
+
+    Both are detected via Jinja template inspection — no model-name allowlist
+    needed, so future models with the same kwargs are handled automatically.
     """
     if tokenizer.chat_template and "enable_thinking" in tokenizer.chat_template:
         kwargs.setdefault("enable_thinking", False)
+    if tokenizer.chat_template and "reasoning_effort" in tokenizer.chat_template:
+        kwargs.setdefault("reasoning_effort", "low")
     return tokenizer.apply_chat_template(msgs, **kwargs)
 
 
