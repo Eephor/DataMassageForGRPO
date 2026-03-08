@@ -8,18 +8,24 @@ Transforms Ethos Academy scored conversation data into TRL `GRPOTrainer`-ready d
 src/grpo_pipeline/
 ├── models.py     # Pydantic schemas for source JSONL records and GRPORecord output
 ├── transform.py  # Thread reconstruction + GRPO prompt formatting
-└── split.py      # Thread-level train/test splitting (no leakage)
+├── split.py      # Thread-level train/test splitting (no leakage)
+├── rewards.py    # GRPO reward functions (format / alignment / trait MAE)
+├── train.py      # GRPO training script (Unsloth + TRL GRPOTrainer)
+└── baseline.py   # Headless batch evaluation against test set
+evaluate.ipynb    # Interactive notebook: single-record inspection + metrics table
 tests/
 └── test_split.py # Verifies no data leakage across splits
 ```
 
 ## Usage
 
+### 1. Data pipeline (no GPU required)
+
 ```bash
-# Install
+# Install data pipeline deps only
 uv sync
 
-# Transform all staged data — write to repo-root/transformed/ (canonical output location)
+# Transform all staged data — write to repo-root/transformed/
 uv run python -m grpo_pipeline.transform --input ../raw-data --output ../transformed
 
 # Split into train/test (thread-level, no leakage)
@@ -28,6 +34,43 @@ uv run python -m grpo_pipeline.split --input ../transformed/dataset.jsonl --outp
 # Verify no leakage
 uv run pytest tests/
 ```
+
+### 2. Training (GPU required — Colab T4 free tier or better)
+
+```bash
+# Step 1: install Unsloth + vLLM (platform-specific CUDA wheels, do this first)
+pip install unsloth vllm
+pip install --no-deps trl==0.22.2
+
+# Step 2: install this package with training extras
+uv pip install -e ".[train]"
+
+# Step 3: run baseline evaluation (base model, no RL)
+python -m grpo_pipeline.baseline \
+    --test-file ../transformed/test.jsonl \
+    --output ../baseline_results.json
+
+# Step 4: train with GRPO (Phase 1 — Llama-1B on T4)
+python -m grpo_pipeline.train \
+    --train-file ../transformed/train.jsonl \
+    --output-dir ../lora-adapter \
+    --max-steps 200
+
+# Phase 2 — Qwen3-8B on Colab Pro L4 (just change --model, no other changes)
+python -m grpo_pipeline.train \
+    --train-file ../transformed/train.jsonl \
+    --output-dir ../lora-adapter-8b \
+    --model unsloth/Qwen3-8B-FP8 \
+    --max-steps 500
+
+# Step 5: evaluate trained model
+python -m grpo_pipeline.baseline \
+    --test-file ../transformed/test.jsonl \
+    --lora-adapter ../lora-adapter \
+    --output ../post_grpo_results.json
+```
+
+For interactive single-record inspection and side-by-side comparison, open `evaluate.ipynb` in Colab or JupyterLab.
 
 ## Canonical Output Directory
 
@@ -109,6 +152,30 @@ The split is **deterministic but shuffled**:
 - Pass `--seed N` for a different but reproducible split
 - The assignment is a random shuffle of thread IDs, not a sequential slice
 
+## Reward Functions
+
+Three GRPO reward functions in `rewards.py`, each with signature `(prompts, completions, **kwargs) -> list[float]`:
+
+| Function | Max value | Scaled by `length_scale`? | Purpose |
+|---|---|---|---|
+| `format_reward` | 1.0 | No | Forces `<think>`/`<verdict>` structured output |
+| `alignment_reward` | 2.0 | Yes | Correct `alignment_status` verdict |
+| `trait_reward` | ~1.0 | Yes | Accurate 12-trait scoring (weighted MAE) |
+
+Max total reward at the final turn of a thread (`length_scale=1.0`): **~4.0**.
+At turn 0 of a 5-turn thread (`length_scale=0.2`): **~1.4**.
+
+The `extract_verdict(text)` helper from `rewards.py` is shared by `baseline.py` and `evaluate.ipynb` — parsing logic lives in one place.
+
+## Hardware Targets
+
+| Phase | Model | GPU | Notes |
+|---|---|---|---|
+| 1 (default) | `unsloth/Llama-3.2-1B-Instruct-FP8-Block` | T4 16 GB (free Colab) | Prototype: verify reward functions, check loss decreases |
+| 2 | `unsloth/Qwen3-8B-FP8` | L4 22 GB (Colab Pro) | Scale up; pass `--model unsloth/Qwen3-8B-FP8` |
+
+Unsloth's `UNSLOTH_VLLM_STANDBY=1` (set automatically by `train.py`) enables sequential vLLM/train memory sharing, making Phase 1 fit on T4.
+
 ## Data Sources
 
-Source files are symlinked in `../raw-data/`. See the project plan for overlap analysis and file selection rationale. 1,508 unique evaluation records across 11 source files.
+Source files are real copies in `../raw-data/`. See the project plan for overlap analysis and file selection rationale. 1,508 unique evaluation records across 11 source files.
