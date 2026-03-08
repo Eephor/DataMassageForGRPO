@@ -60,7 +60,7 @@ python -m grpo_pipeline.train \
 python -m grpo_pipeline.train \
     --train-file ../transformed/train.jsonl \
     --output-dir ../lora-adapter-8b \
-    --model unsloth/Qwen3-8B-FP8 \
+    --model unsloth/Qwen3-8B-Instruct \
     --max-steps 500
 
 # Step 5: evaluate trained model
@@ -171,8 +171,8 @@ The `extract_verdict(text)` helper from `rewards.py` is shared by `baseline.py` 
 
 | Phase | Model | GPU | Notes |
 |---|---|---|---|
-| 1 (default) | `unsloth/Llama-3.2-1B-Instruct-FP8-Block` | T4 16 GB (free Colab) | Prototype: verify reward functions, check loss decreases |
-| 2 | `unsloth/Qwen3-8B-FP8` | L4 22 GB (Colab Pro) | Scale up; pass `--model unsloth/Qwen3-8B-FP8` |
+| 1 (default) | `unsloth/Llama-3.2-1B-Instruct` | T4 16 GB (free Colab) | Prototype: verify reward functions, check loss decreases |
+| 2 | `unsloth/Qwen3-8B-Instruct` | L4 22 GB (Colab Pro) | Scale up; pass `--model unsloth/Qwen3-8B-Instruct` |
 
 Unsloth's `UNSLOTH_VLLM_STANDBY=1` (set automatically by `train.py`) enables sequential vLLM/train memory sharing, making Phase 1 fit on T4.
 

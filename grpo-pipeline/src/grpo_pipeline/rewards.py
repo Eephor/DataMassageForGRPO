@@ -103,6 +103,12 @@ _VERDICT_RE = re.compile(r"<verdict>(.*?)</verdict>", re.DOTALL)
 # ---------------------------------------------------------------------------
 
 
+def extract_think(text: str) -> str | None:
+    """Return the content of the <think>…</think> block, or None if absent."""
+    m = _THINK_RE.search(text)
+    return m.group(1).strip() if m else None
+
+
 def extract_verdict(text: str) -> dict | None:
     """Parse the model's completion and return the verdict dict, or None on failure.
 
