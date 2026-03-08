@@ -6,13 +6,15 @@ Transforms Ethos Academy scored conversation data into TRL `GRPOTrainer`-ready d
 
 ```
 src/grpo_pipeline/
-├── models.py       # Pydantic schemas for source JSONL records and GRPORecord output
-├── transform.py    # Thread reconstruction + GRPO prompt formatting (offline pipeline)
-├── simulation.py   # Live simulation: ParticipantBot, ConversationEnvironment, SimulatedDataset
-├── split.py        # Thread-level train/test splitting (no leakage)
-├── rewards.py      # GRPO reward functions + safe_apply_template helper
-├── train.py        # GRPO training script (Unsloth + TRL GRPOTrainer) — CLI entry point
-└── baseline.py     # Headless batch evaluation against test set
+├── models.py          # Pydantic schemas for source JSONL records and GRPORecord output
+├── transform.py       # Thread reconstruction + GRPO prompt formatting (offline pipeline)
+├── simulation.py      # Live simulation: ParticipantBot, ConversationEnvironment, SimulatedDataset
+├── bot_profiles.py    # Profile extraction CLI: avg_traits, few-shot examples, trait_description
+├── llm_bots.py        # LLMBackend protocol, concrete backends, LLMParticipantBot, OracleEvaluator, LLMConversationEnvironment
+├── split.py           # Thread-level train/test splitting (no leakage)
+├── rewards.py         # GRPO reward functions + safe_apply_template helper
+├── train.py           # GRPO training script (Unsloth + TRL GRPOTrainer) — CLI entry point
+└── baseline.py        # Headless batch evaluation against test set
 train.ipynb       # Interactive training notebook (Colab)
 evaluate.ipynb    # Interactive notebook: single-record inspection + metrics table
 setup.sh          # One-command VM/bare-metal setup + optional training launch
@@ -20,7 +22,8 @@ Dockerfile        # Container image (CUDA 12.4, PyTorch 2.6, Unsloth)
 docker-compose.yml# GPU-enabled compose service with volume mounts
 tests/
 ├── test_split.py            # Verifies no data leakage across splits
-└── test_pipeline_format.py  # Unit tests for template formatting and reward functions
+├── test_pipeline_format.py  # Unit tests for template formatting and reward functions
+└── test_simulation.py       # Unit tests for ParticipantBot / ConversationEnvironment / SimulatedDataset
 ```
 
 ## Usage
@@ -101,11 +104,16 @@ For interactive single-record inspection and side-by-side comparison, open `eval
 
 Instead of training on a pre-transformed static JSONL, you can stream training data live from the raw conversation files. In this mode the oversight agent observes each conversation thread **turn-by-turn** as the participants post their messages — mirroring the real-life deployment scenario where the agent monitors conversations as they unfold.
 
-### How it works
+This mode is the first step of a broader effort ([#1](https://github.com/Eephor/DataMassageForGRPO/issues/1)) to replace the simplified "conversation log" view with a proper multi-agent training environment where each participant is an autonomous entity that the oversight agent interacts with in real time.
+
+### Architecture overview
+
+The simulation environment currently operates in **mock-bot mode** ([#3](https://github.com/Eephor/DataMassageForGRPO/issues/3), complete). The participant abstraction is intentionally designed for a drop-in upgrade to **LLM-powered bots** ([#4](https://github.com/Eephor/DataMassageForGRPO/issues/4), upcoming — see [Roadmap](#roadmap) below).
 
 `simulation.py` introduces three components that replace the static data pipeline during training:
 
-- **`ReplayBot`** — wraps one author's historical messages and emits them one at a time in chronological order. The abstract `ParticipantBot` base class is designed for future LLM-powered subclasses that generate utterances on-the-fly.
+- **`ParticipantBot`** (abstract base) — represents one conversation participant. Defines the interface every bot must implement: `author`, `next_message()`, and `reset()`. Designed so LLM-backed subclasses can be swapped in without changing the environment or trainer code.
+- **`ReplayBot`** — the current concrete implementation. Wraps one author's historical messages and emits them one at a time in chronological order, faithfully replaying the golden dataset.
 - **`ConversationEnvironment`** — manages a single thread. Each `step()` call pops the next chronological message, appends it to the running context, and returns the new state. Only messages with a usable evaluation are replayed.
 - **`SimulatedDataset`** — wraps the environment in a HuggingFace `IterableDataset` generator. It loops indefinitely, shuffling threads each epoch, and yields `GRPORecord`-shaped dicts with the same column schema as `transformed/train.jsonl`. The `format_prompts` map and all reward functions are unchanged.
 
@@ -381,6 +389,148 @@ docker run --gpus all --rm \
   moltbook-grpo \
   --train-file /data/train.jsonl --output-dir /output
 ```
+
+## LLM Bot Mode
+
+An optional upgrade to the live simulation that replaces `ReplayBot` with LLM-powered participant bots. Each bot carries a persona prompt derived from the Ethos Academy taxonomy, and a separate oracle LLM scores every synthetic message to produce ground-truth labels. This mode costs API credits; the existing replay mode is completely free and unchanged.
+
+Part of the broader granular training environment initiative ([#1](https://github.com/Eephor/DataMassageForGRPO/issues/1), [#3](https://github.com/Eephor/DataMassageForGRPO/issues/3), [#4](https://github.com/Eephor/DataMassageForGRPO/issues/4)).
+
+### Architecture
+
+```
+Free — Replay Mode
+  raw-data  →  ReplayBot (per author)  →  ConversationEnvironment  →  GRPOTrainer
+
+LLM Bot Mode (--use-llm-bots)
+  raw-data  →  build_profiles CLI  →  bot-profiles/{author}.json
+                                   →  LLMParticipantBot (per author)
+                                   →  LLMConversationEnvironment
+                                   →  OracleEvaluator
+                                   →  GRPOTrainer
+```
+
+When `--use-llm-bots` is off (default), the code path is identical to the existing replay mode — zero new dependencies are imported.
+
+### Step 0 — Build bot profiles (one-time, no GPU or LLM required)
+
+`bot_profiles.py` scans all `batch_conversations*.jsonl` files in `raw-data/` and, for each unique author, extracts:
+
+- `avg_traits` — mean of their 12 Ethos trait scores across all evaluated messages
+- `dominant_alignment` / `dominant_phronesis` — most common label across their messages
+- `few_shot_examples` — up to 3 of their longest actual messages (most informative for persona calibration)
+- `trait_description` — a natural-language paragraph synthesised from the Ethos taxonomy descriptions and scoring rubrics, calibrated to the author's actual scores
+
+```bash
+uv run python -m grpo_pipeline.build_profiles \
+    --input ../raw-data \
+    --output ../bot-profiles
+```
+
+Writes one `{author}.json` per unique author to `../bot-profiles/`. Rerun only when new raw-data files are added.
+
+### Step 1 — LLM backends
+
+`llm_bots.py` provides four concrete `LLMBackend` implementations behind a single `Protocol`:
+
+| Backend | Env var required | Package |
+|---|---|---|
+| `ClaudeBackend` | `ANTHROPIC_API_KEY` | `anthropic` |
+| `OpenAIBackend` | `OPENAI_API_KEY` | `openai` |
+| `GeminiBackend` | `GOOGLE_API_KEY` | `google-generativeai` |
+| `OllamaBackend` | none | `requests` (built-in dep) |
+
+All share the constructor signature `Backend(model: str)`. Use the `make_backend(name, model)` factory to instantiate from CLI flags or notebook config.
+
+All LLM SDK packages are **lazy-imported** — nothing is imported unless the corresponding backend is actually used. Training without `--use-llm-bots` has zero new import overhead.
+
+Install the optional extras for cloud backends:
+
+```bash
+uv pip install -e ".[llm-bots]"   # anthropic + openai + google-generativeai
+```
+
+### Step 2 — `LLMParticipantBot` and `OracleEvaluator`
+
+**`LLMParticipantBot`** — subclass of `ParticipantBot`. On each `next_message()` call it builds a persona prompt from the `BotProfile` and calls the participant backend:
+
+```
+You are {author}, a participant on Moltbook (an AI social network).
+
+YOUR CHARACTER TRAITS:
+{trait_description}
+
+EXAMPLE MESSAGES YOU HAVE WRITTEN:
+---
+{few_shot_1}
+---
+{few_shot_2}
+---
+
+TASK: The conversation below is underway. Write your next reply as {author}.
+Stay in character. Respond with a single Moltbook post — no meta-commentary.
+
+=== CONVERSATION SO FAR ===
+{context_block}
+```
+
+Unlike `ReplayBot`, `is_exhausted()` always returns `False` — LLM bots generate indefinitely.
+
+**`OracleEvaluator`** — uses a (potentially different) `LLMBackend` to score each synthetic message and produce a full `EvaluationBlock`. The oracle prompt asks for numeric scores on all 12 Ethos traits (0.0–1.0) plus `alignment_status` and `phronesis` labels. Falls back to the bot's `avg_traits` from the profile if the response cannot be parsed, so training is never blocked by a single bad API call.
+
+### Step 3 — `LLMConversationEnvironment`
+
+Uses a historical thread as a **turn schedule template** — same authors, same turn count, same ordering — but generates fresh content for each slot. This keeps conversation length and turn distribution realistic while ensuring novel training signal each epoch.
+
+For each turn: `LLMParticipantBot.next_message()` → `OracleEvaluator.evaluate()` → `transform.build_grpo_record()`.
+
+### CLI
+
+```bash
+python -m grpo_pipeline.train \
+    --raw-data-dir ../raw-data \
+    --output-dir ../lora-adapter \
+    --use-llm-bots \
+    --bot-profiles-dir ../bot-profiles \
+    --participant-backend claude \
+    --participant-model claude-sonnet-4-5 \
+    --oracle-backend claude \
+    --oracle-model claude-sonnet-4-5
+```
+
+| Flag | Default | Description |
+|---|---|---|
+| `--use-llm-bots` | off | Enable LLM bot mode (requires `--raw-data-dir`) |
+| `--bot-profiles-dir` | `../bot-profiles` | Directory of `{author}.json` profile files |
+| `--participant-backend` | `claude` | `claude` \| `openai` \| `gemini` \| `ollama` |
+| `--participant-model` | `claude-sonnet-4-5` | Model name passed to the participant backend |
+| `--oracle-backend` | same as `--participant-backend` | Backend used for oracle evaluation |
+| `--oracle-model` | same as `--participant-model` | Model name passed to the oracle backend |
+
+### Notebook
+
+In `train.ipynb` (Section 2 — Configuration), set:
+
+```python
+USE_LLM_BOTS        = True            # False = static JSONL or replay mode (default)
+BOT_PROFILES_DIR    = '../bot-profiles'
+PARTICIPANT_BACKEND = 'claude'        # 'claude' | 'openai' | 'gemini' | 'ollama'
+PARTICIPANT_MODEL   = 'claude-sonnet-4-5'
+ORACLE_BACKEND      = 'claude'
+ORACLE_MODEL        = 'claude-sonnet-4-5'
+```
+
+Section 4 branches on `USE_LLM_BOTS` automatically (third branch after static JSONL and replay mode).
+
+### Cost characteristics
+
+Each training step in LLM bot mode makes two LLM calls per conversation turn: one participant call and one oracle call. Costs scale with `total_turns × steps_per_epoch`. Using `OllamaBackend` with a local model avoids all API costs while retaining the persona-driven generation.
+
+### Roadmap
+
+1. **Mock-bot replay** ✅ ([#3](https://github.com/Eephor/DataMassageForGRPO/issues/3)) — `ReplayBot` + `ConversationEnvironment` replay historical messages turn-by-turn.
+2. **LLM-powered participant bots** 🔜 ([#4](https://github.com/Eephor/DataMassageForGRPO/issues/4)) — `LLMParticipantBot` + `OracleEvaluator` + `LLMConversationEnvironment` as described above.
+3. **Full multi-agent feedback loop** — the oversight agent's verdicts feed back into the environment, enabling reactive participant behaviour and closing the training loop.
 
 ## Data Sources
 
