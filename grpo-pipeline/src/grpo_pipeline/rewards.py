@@ -133,17 +133,6 @@ def safe_apply_template(tokenizer, msgs: list[dict], **kwargs) -> str:
     return tokenizer.apply_chat_template(msgs, **kwargs)
 
 
-# region agent log
-import time as _time
-def _dbg(msg, data, hyp="?"):
-    import json as _json, sys as _sys
-    try:
-        print(f"[DEBUG-043113][{hyp}] {msg}: {_json.dumps(data)}", flush=True, file=_sys.stderr)
-    except Exception: pass
-_dbg("rewards.py module loaded", {"file": __file__, "version": "fixed-with-_completion_text"}, "H1")
-# endregion agent log
-
-
 def _completion_text(completion) -> str:
     """Extract the generated text from a completion in either TRL format.
 
@@ -152,25 +141,13 @@ def _completion_text(completion) -> str:
     When dataset['prompt'] holds pre-formatted strings (our current setup),
     TRL passes completions as plain strings.  Both are handled here.
     """
-    # region agent log
-    _dbg("_completion_text called", {
-        "type": type(completion).__name__,
-        "is_str": isinstance(completion, str),
-        "is_list": isinstance(completion, list),
-        "first_elem_type": type(completion[0]).__name__ if (isinstance(completion, (list, tuple)) and len(completion) > 0) else "n/a",
-        "preview": str(completion)[:120] if not isinstance(completion, (list, tuple)) else str(completion[0])[:120],
-    }, "H4")
-    # endregion agent log
     if isinstance(completion, str):
         return completion
     # list[dict] — standard TRL message format
     if isinstance(completion, list) and len(completion) > 0 and isinstance(completion[0], dict):
         return completion[0].get("content", "")
-    # fallback: list containing a string directly (e.g. [assistant_text])
+    # fallback: list containing a string directly
     if isinstance(completion, list) and len(completion) > 0 and isinstance(completion[0], str):
-        # region agent log
-        _dbg("_completion_text: list[str] branch (unexpected format)", {"preview": str(completion[0])[:120]}, "H4")
-        # endregion agent log
         return completion[0]
     return str(completion)
 
@@ -335,18 +312,6 @@ def format_reward(
     how much context the agent has seen.
     """
     scores: list[float] = []
-    # region agent log
-    if completions:
-        c0 = completions[0]
-        _dbg("format_reward: first completion structure", {
-            "type": type(c0).__name__,
-            "is_str": isinstance(c0, str),
-            "is_list": isinstance(c0, list),
-            "len_if_list": len(c0) if isinstance(c0, list) else "n/a",
-            "first_elem_type": type(c0[0]).__name__ if isinstance(c0, list) and c0 else "n/a",
-            "preview": str(c0)[:200],
-        }, "H4")
-    # endregion agent log
     for completion in completions:
         text = _completion_text(completion)
         has_think = _THINK_RE.search(text) is not None
