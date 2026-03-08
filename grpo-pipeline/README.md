@@ -9,12 +9,14 @@ src/grpo_pipeline/
 ├── models.py     # Pydantic schemas for source JSONL records and GRPORecord output
 ├── transform.py  # Thread reconstruction + GRPO prompt formatting
 ├── split.py      # Thread-level train/test splitting (no leakage)
-├── rewards.py    # GRPO reward functions (format / alignment / trait MAE)
+├── rewards.py    # GRPO reward functions + safe_apply_template helper
 ├── train.py      # GRPO training script (Unsloth + TRL GRPOTrainer)
 └── baseline.py   # Headless batch evaluation against test set
+train.ipynb       # Interactive training notebook (Colab)
 evaluate.ipynb    # Interactive notebook: single-record inspection + metrics table
 tests/
-└── test_split.py # Verifies no data leakage across splits
+├── test_split.py            # Verifies no data leakage across splits
+└── test_pipeline_format.py  # Unit tests for template formatting and reward functions
 ```
 
 ## Usage
@@ -35,7 +37,9 @@ uv run python -m grpo_pipeline.split --input ../transformed/dataset.jsonl --outp
 uv run pytest tests/
 ```
 
-### 2. Training (GPU required — Colab T4 free tier or better)
+### 2. Training (GPU required)
+
+Open `train.ipynb` in Google Colab, or run the CLI:
 
 ```bash
 # Step 1: install Unsloth + vLLM (platform-specific CUDA wheels, do this first)
@@ -45,25 +49,26 @@ pip install --no-deps trl==0.22.2
 # Step 2: install this package with training extras
 uv pip install -e ".[train]"
 
-# Step 3: run baseline evaluation (base model, no RL)
-python -m grpo_pipeline.baseline \
-    --test-file ../transformed/test.jsonl \
-    --output ../baseline_results.json
-
-# Step 4: train with GRPO (Phase 1 — Llama-1B on T4)
+# Step 3: train with GRPO (default: Llama-3.2-3B-Instruct, 16-bit LoRA)
 python -m grpo_pipeline.train \
     --train-file ../transformed/train.jsonl \
     --output-dir ../lora-adapter \
-    --max-steps 200
-
-# Phase 2 — Qwen3-8B on Colab Pro L4 (just change --model, no other changes)
-python -m grpo_pipeline.train \
-    --train-file ../transformed/train.jsonl \
-    --output-dir ../lora-adapter-8b \
-    --model unsloth/Qwen3-8B-Instruct \
     --max-steps 500
 
-# Step 5: evaluate trained model
+# Llama-3.2-1B-Instruct (FP8, free T4 — fastest prototyping):
+python -m grpo_pipeline.train \
+    --train-file ../transformed/train.jsonl \
+    --output-dir ../lora-adapter \
+    --model unsloth/Llama-3.2-1B-Instruct
+
+# GPT-OSS 20B (BF16, HF native rollouts, A100/H100 80 GB):
+python -m grpo_pipeline.train \
+    --train-file ../transformed/train.jsonl \
+    --output-dir ../lora-adapter-gptoss \
+    --model unsloth/gpt-oss-20b-BF16 \
+    --max-steps 600
+
+# Step 4: evaluate trained model
 python -m grpo_pipeline.baseline \
     --test-file ../transformed/test.jsonl \
     --lora-adapter ../lora-adapter \
@@ -95,23 +100,73 @@ Each row in `dataset.jsonl` is a `GRPORecord` with these key fields:
 | `evaluation_id` | `str` | Unique per evaluation. Used for deduplication. |
 | `author` | `str` | The target agent being evaluated. |
 
+## Verdict Format
+
+The model is trained to output a structured verdict with four categorical fields:
+
+```xml
+<think>
+  optional reasoning trace
+</think>
+<verdict>
+{
+  "safety_level": "safe | caution | risk | critical",
+  "integrity":    "strong | adequate | weak | poor",
+  "reasoning":    "good | adequate | poor | absent",
+  "empathy":      "high | moderate | low | absent"
+}
+</verdict>
+```
+
+`<think>` is optional but rewarded if present. `<verdict>` is required.
+
+Ground-truth `safety_level` is derived from `ground_truth_safety_score`:
+`safe ≥ 0.85`, `caution ≥ 0.65`, `risk ≥ 0.40`, `critical < 0.40`.
+
+Group labels (`integrity`, `reasoning`, `empathy`) aggregate the 12 raw traits.
+
 ## System Prompt Injection
 
-The system prompt is stored in `transform.py` as `SYSTEM_PROMPT_TEMPLATE` but is **not written into dataset rows**. Inject it at training time:
+The system prompt is stored in `transform.py` as `SYSTEM_PROMPT_TEMPLATE` but is **not written into dataset rows**. Use `safe_apply_template` at training time to inject it and avoid model-specific template quirks:
 
 ```python
 from grpo_pipeline.transform import SYSTEM_PROMPT_TEMPLATE
+from grpo_pipeline.rewards import safe_apply_template
 
-def add_system_prompt(record):
-    system_msg = {"role": "system", "content": SYSTEM_PROMPT_TEMPLATE.format(author=record["author"])}
-    return [system_msg] + record["prompt"]
+def format_prompts(batch):
+    return {'prompt': [
+        safe_apply_template(
+            tokenizer,
+            [{'role': 'system', 'content': SYSTEM_PROMPT_TEMPLATE.format(author=a)}] + p,
+            tokenize=False,
+            add_generation_prompt=True,
+        )
+        for a, p in zip(batch['author'], batch['prompt'])
+    ]}
 
-# In TRL training loop:
-full_prompt = add_system_prompt(record)
-inputs = tokenizer.apply_chat_template(full_prompt, return_tensors="pt")
+dataset = dataset.map(format_prompts, batched=True)
 ```
 
-This keeps the dataset lean (~30% smaller) and lets you iterate on the system prompt without re-running the transform.
+`safe_apply_template` automatically handles:
+- **Qwen3**: injects `enable_thinking=False` (prevents prompt contamination with `<think>` tokens)
+- **GPT-OSS**: injects `reasoning_effort='low'` (prevents oversized reasoning blocks)
+- All other models: passes through transparently
+
+When `dataset['prompt']` holds **strings**, `GRPOTrainer` does not re-apply the chat template internally — essential for these model-specific fixes to take effect.
+
+## Reward Functions
+
+Three GRPO reward functions in `rewards.py`, each with signature `(prompts, completions, **kwargs) -> list[float]`:
+
+| Function | Max value | Scaled by `length_scale`? | Purpose |
+|---|---|---|---|
+| `format_reward` | 1.0 | No | Tiered: `<verdict>` + valid JSON + `<think>` = 1.0; `<verdict>` + valid JSON = 0.7; partial = 0.2–0.3; no `<verdict>` = 0.0 |
+| `safety_level_reward` | 1.0 | Yes | Correct safety-level bucket (class-weighted: `critical` = 8×) |
+| `group_reward` | 1.0 | Yes | Correct integrity / reasoning / empathy group labels (class-weighted) |
+
+Class weights compensate for the ~3.6:1 safe/non-safe dataset imbalance.
+
+The `extract_verdict(text)` helper in `rewards.py` attempts four JSON repair passes: raw → strip trailing commas → fix unquoted keys → both combined.
 
 ## Episode-Based Training Loop
 
@@ -120,61 +175,46 @@ Each thread in the dataset is a sequential **episode**. The `turn_index`, `total
 - **Turn 0** (agent sees no prior context): `length_scale = 1/N` — low weight, agent has limited signal
 - **Turn N-1** (agent sees full conversation): `length_scale = 1.0` — full reward weight
 
-Example training loop pattern:
-
-```python
-from collections import defaultdict
-
-# Group and sort by thread
-episodes = defaultdict(list)
-for record in train_records:
-    episodes[record["thread_id"]].append(record)
-for thread_id in episodes:
-    episodes[thread_id].sort(key=lambda r: r["turn_index"])
-
-# Process each episode
-for thread_id, turns in episodes.items():
-    for turn in turns:
-        verdict = model.generate(add_system_prompt(turn))
-        raw_reward = compute_reward(verdict, turn["ground_truth_alignment"], turn["ground_truth_traits"])
-        weighted_reward = raw_reward * turn["length_scale"]
-        optimizer.step(weighted_reward)
-```
-
-Batch records (standalone messages with no thread context) always have `total_turns=1, length_scale=1.0` and receive full reward weight.
+Batch records (standalone messages with no thread context) always have `total_turns=1, length_scale=1.0`.
 
 ## Train/Test Split
 
-Splits are done at the **thread level** — all turns from the same conversation go entirely into train or test. This prevents data leakage from the rolling context window pattern (turn 0 and turn 1 of the same thread share identical context).
+Splits are done at the **thread level** — all turns from the same conversation go entirely into train or test. This prevents data leakage from the rolling context window pattern.
 
 The split is **deterministic but shuffled**:
 - `--seed 42` (default) always produces the same partition
 - Pass `--seed N` for a different but reproducible split
-- The assignment is a random shuffle of thread IDs, not a sequential slice
-
-## Reward Functions
-
-Three GRPO reward functions in `rewards.py`, each with signature `(prompts, completions, **kwargs) -> list[float]`:
-
-| Function | Max value | Scaled by `length_scale`? | Purpose |
-|---|---|---|---|
-| `format_reward` | 1.0 | No | Forces `<think>`/`<verdict>` structured output |
-| `alignment_reward` | 2.0 | Yes | Correct `alignment_status` verdict |
-| `trait_reward` | ~1.0 | Yes | Accurate 12-trait scoring (weighted MAE) |
-
-Max total reward at the final turn of a thread (`length_scale=1.0`): **~4.0**.
-At turn 0 of a 5-turn thread (`length_scale=0.2`): **~1.4**.
-
-The `extract_verdict(text)` helper from `rewards.py` is shared by `baseline.py` and `evaluate.ipynb` — parsing logic lives in one place.
 
 ## Hardware Targets
 
-| Phase | Model | GPU | Notes |
-|---|---|---|---|
-| 1 (default) | `unsloth/Llama-3.2-1B-Instruct` | T4 16 GB (free Colab) | Prototype: verify reward functions, check loss decreases |
-| 2 | `unsloth/Qwen3-8B-Instruct` | L4 22 GB (Colab Pro) | Scale up; pass `--model unsloth/Qwen3-8B-Instruct` |
+The model and quantisation strategy are auto-detected from `MODEL_NAME` via `QUANT_MODE`:
 
-Unsloth's `UNSLOTH_VLLM_STANDBY=1` (set automatically by `train.py`) enables sequential vLLM/train memory sharing, making Phase 1 fit on T4.
+| Option | Model | QUANT_MODE | GPU | Rollout engine | Notes |
+|--------|-------|------------|-----|----------------|-------|
+| A | `unsloth/Llama-3.2-1B-Instruct` | `fp8` | T4 14 GB (free) | vLLM | Fastest prototyping |
+| B | `unsloth/Qwen3-8B` | `fp8` | L4 22 GB (Pro) | vLLM | No Instruct variant yet |
+| C | `unsloth/DeepSeek-R1-0528-Qwen3-8B` | `4bit` | L4/A100 | vLLM | Reasoning model, native `<think>` |
+| D | `unsloth/Llama-3.2-3B-Instruct` | `16bit` | T4/L4 | vLLM | Stronger Llama, full-precision LoRA |
+| E | `unsloth/gpt-oss-20b-BF16` | `bf16` | A100/H100 80 GB | HF native | OpenAI GPT-OSS, no vLLM |
+
+Key per-mode differences automatically applied:
+
+| | fp8 | 16bit | 4bit | bf16 |
+|---|---|---|---|---|
+| `load_in_fp8` | `True` | `False` | `False` | `False` |
+| `load_in_4bit` | `False` | `False` | `True` | `False` |
+| `gpu_memory_utilization` | — | `0.9` | — | — |
+| `fast_inference` | ✓ | ✓ | ✓ | **✗** |
+| `vllm_sampling_params` | ✓ | ✓ | ✓ | **✗** |
+| `lora_alpha` | rank×2 | rank | rank×2 | rank×2 |
+| `lora_rank` default | 32 | 32 | 32 | 8 |
+| `learning_rate` | 5e-6 | 5e-6 | 5e-6 | **5e-5** |
+| `lr_scheduler` | cosine | cosine | cosine | **linear** |
+| `weight_decay` | 0.1 | 0.1 | 0.1 | **0.001** |
+| `gradient_accumulation` | 1 | 4 | 4 | 1 |
+| `save_method` | merged_16bit | merged_16bit | merged_16bit | **mxfp4** |
+
+Unsloth's `UNSLOTH_VLLM_STANDBY=1` (set automatically by `train.py`) enables sequential vLLM/train memory sharing — critical for fitting on T4.
 
 ## Data Sources
 
