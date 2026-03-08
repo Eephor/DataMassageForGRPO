@@ -110,6 +110,20 @@ _THINK_RE = re.compile(r"<think>(.*?)</think>", re.DOTALL)
 _VERDICT_RE = re.compile(r"<verdict>(.*?)</verdict>", re.DOTALL)
 
 
+def _completion_text(completion) -> str:
+    """Extract the generated text from a completion in either TRL format.
+
+    When dataset['prompt'] holds message dicts, TRL passes completions as
+    list[dict]: [{"role": "assistant", "content": "..."}].
+    When dataset['prompt'] holds pre-formatted strings (our current setup),
+    TRL passes completions as plain strings.  Both are handled here.
+    """
+    if isinstance(completion, str):
+        return completion
+    # list[dict] — standard TRL message format
+    return completion[0]["content"]
+
+
 # ---------------------------------------------------------------------------
 # Bucketing helpers (also used by baseline.py and evaluate.ipynb)
 # ---------------------------------------------------------------------------
@@ -229,8 +243,8 @@ def _strip_trailing_commas(s: str) -> str:
 
 
 def format_reward(
-    prompts: list[list[dict]],
-    completions: list[list[dict]],
+    prompts: list,
+    completions: list,  # list[list[dict]] or list[str] depending on TRL prompt format
     **kwargs,
 ) -> list[float]:
     """Reward well-structured <think>…</think><verdict>…</verdict> outputs.
@@ -245,7 +259,7 @@ def format_reward(
     """
     scores: list[float] = []
     for completion in completions:
-        text = completion[0]["content"]
+        text = _completion_text(completion)
         has_think = _THINK_RE.search(text) is not None
         has_verdict_tag = _VERDICT_RE.search(text) is not None
 
@@ -260,8 +274,8 @@ def format_reward(
 
 
 def safety_level_reward(
-    prompts: list[list[dict]],
-    completions: list[list[dict]],
+    prompts: list,
+    completions: list,  # list[list[dict]] or list[str] depending on TRL prompt format
     ground_truth_safety_score: list[float],
     length_scale: list[float],
     **kwargs,
@@ -282,7 +296,7 @@ def safety_level_reward(
     """
     scores: list[float] = []
     for completion, gt_score, scale in zip(completions, ground_truth_safety_score, length_scale):
-        text = completion[0]["content"]
+        text = _completion_text(completion)
         verdict = extract_verdict(text)
 
         if verdict is None:
@@ -302,8 +316,8 @@ def safety_level_reward(
 
 
 def group_reward(
-    prompts: list[list[dict]],
-    completions: list[list[dict]],
+    prompts: list,
+    completions: list,  # list[list[dict]] or list[str] depending on TRL prompt format
     ground_truth_traits: list[dict],
     ground_truth_safety_score: list[float],
     length_scale: list[float],
@@ -321,7 +335,7 @@ def group_reward(
     for completion, gt_traits, gt_score, scale in zip(
         completions, ground_truth_traits, ground_truth_safety_score, length_scale
     ):
-        text = completion[0]["content"]
+        text = _completion_text(completion)
         verdict = extract_verdict(text)
 
         if verdict is None:
