@@ -123,23 +123,6 @@ def _get_system_prompt_template() -> str:
     return SYSTEM_PROMPT_TEMPLATE
 
 
-def safe_apply_template(tokenizer, msgs: list[dict], **kwargs) -> str:
-    """Model-agnostic chat-template wrapper (Llama + Qwen3 + future models).
-
-    Qwen3's default template appends '<think>\\n' to the generation prompt
-    (thinking mode), so the model's completion starts INSIDE a <think> block —
-    the opening tag is in the prompt, not the completion — and format_reward
-    returns 0.0 for every step.
-
-    We detect thinking-mode support by inspecting the Jinja template string
-    rather than catching TypeError, so this works for any future model that
-    adds 'enable_thinking' to its template without a name-based allowlist.
-    """
-    if tokenizer.chat_template and "enable_thinking" in tokenizer.chat_template:
-        kwargs.setdefault("enable_thinking", False)
-    return tokenizer.apply_chat_template(msgs, **kwargs)
-
-
 # ---------------------------------------------------------------------------
 # Main training command
 # ---------------------------------------------------------------------------
@@ -223,7 +206,12 @@ def main(
     FastLanguageModel, GRPOConfig, GRPOTrainer, Dataset = _import_training_deps()
 
     # Import reward functions after confirming deps are available
-    from grpo_pipeline.rewards import format_reward, group_reward, safety_level_reward  # noqa: PLC0415
+    from grpo_pipeline.rewards import (  # noqa: PLC0415
+        format_reward,
+        group_reward,
+        safe_apply_template,
+        safety_level_reward,
+    )
 
     # ------------------------------------------------------------------
     # 1. Load model + tokenizer

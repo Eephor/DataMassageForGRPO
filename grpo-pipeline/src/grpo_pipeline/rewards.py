@@ -109,6 +109,29 @@ _GROUP_TRAITS: dict[str, dict[str, list[str]]] = {
 _THINK_RE = re.compile(r"<think>(.*?)</think>", re.DOTALL)
 _VERDICT_RE = re.compile(r"<verdict>(.*?)</verdict>", re.DOTALL)
 
+
+# ---------------------------------------------------------------------------
+# Chat-template formatting (model-agnostic, no ML dependencies)
+# ---------------------------------------------------------------------------
+
+
+def safe_apply_template(tokenizer, msgs: list[dict], **kwargs) -> str:
+    """Model-agnostic chat-template wrapper (Llama + Qwen3 + future models).
+
+    Qwen3's default template appends '<think>\\n' to the generation prompt
+    (thinking mode), so the model's completion starts INSIDE a <think> block —
+    the opening tag is in the prompt, not the completion — and format_reward
+    returns 0.0 for every step.
+
+    We detect thinking-mode support by inspecting the Jinja template string
+    rather than catching TypeError, so this works for any future model that
+    adds 'enable_thinking' to its template without a name-based allowlist.
+    """
+    if tokenizer.chat_template and "enable_thinking" in tokenizer.chat_template:
+        kwargs.setdefault("enable_thinking", False)
+    return tokenizer.apply_chat_template(msgs, **kwargs)
+
+
 # region agent log
 import time as _time
 def _dbg(msg, data, hyp="?"):
