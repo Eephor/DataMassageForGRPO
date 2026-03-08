@@ -110,13 +110,11 @@ _THINK_RE = re.compile(r"<think>(.*?)</think>", re.DOTALL)
 _VERDICT_RE = re.compile(r"<verdict>(.*?)</verdict>", re.DOTALL)
 
 # region agent log
-import os as _os, time as _time
+import time as _time
 def _dbg(msg, data, hyp="?"):
-    import json as _json
-    _log = "/home/csaba/repos/AIML/OversightAgent/DataMassageForGRPO/.cursor/debug-043113.log"
+    import json as _json, sys as _sys
     try:
-        entry = _json.dumps({"sessionId":"043113","timestamp":int(_time.time()*1000),"location":"rewards.py","message":msg,"data":data,"hypothesisId":hyp}) + "\n"
-        with open(_log, "a") as _f: _f.write(entry)
+        print(f"[DEBUG-043113][{hyp}] {msg}: {_json.dumps(data)}", flush=True, file=_sys.stderr)
     except Exception: pass
 _dbg("rewards.py module loaded", {"file": __file__, "version": "fixed-with-_completion_text"}, "H1")
 # endregion agent log
