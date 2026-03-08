@@ -45,7 +45,8 @@ Usage
     python -m grpo_pipeline.train \\
         --train-file ../transformed/train.jsonl \\
         --output-dir ../lora-adapter \\
-        --max-steps 200
+        --max-steps 350 \\
+        --kl-coef 0.1
 
     # Scale to 8B:
     python -m grpo_pipeline.train \\
@@ -122,14 +123,21 @@ def _get_system_prompt_template() -> str:
     return SYSTEM_PROMPT_TEMPLATE
 
 
-def inject_system_prompts(batch: dict) -> dict:
-    """Prepend a per-author system prompt to every prompt in a HuggingFace batch."""
-    template = _get_system_prompt_template()
-    new_prompts = []
-    for author, user_msgs in zip(batch["author"], batch["prompt"]):
-        system_msg = {"role": "system", "content": template.format(author=author)}
-        new_prompts.append([system_msg] + user_msgs)
-    return {"prompt": new_prompts}
+def safe_apply_template(tokenizer, msgs: list[dict], **kwargs) -> str:
+    """Model-agnostic chat-template wrapper (Llama + Qwen3 + future models).
+
+    Qwen3's default template appends '<think>\\n' to the generation prompt
+    (thinking mode), so the model's completion starts INSIDE a <think> block —
+    the opening tag is in the prompt, not the completion — and format_reward
+    returns 0.0 for every step.
+
+    We detect thinking-mode support by inspecting the Jinja template string
+    rather than catching TypeError, so this works for any future model that
+    adds 'enable_thinking' to its template without a name-based allowlist.
+    """
+    if tokenizer.chat_template and "enable_thinking" in tokenizer.chat_template:
+        kwargs.setdefault("enable_thinking", False)
+    return tokenizer.apply_chat_template(msgs, **kwargs)
 
 
 # ---------------------------------------------------------------------------
@@ -170,7 +178,7 @@ def main(
     max_steps: Annotated[
         int,
         typer.Option("--max-steps", help="Total GRPO training steps. Set to -1 for full epoch."),
-    ] = 200,
+    ] = 350,
     num_generations: Annotated[
         int,
         typer.Option(
@@ -190,6 +198,17 @@ def main(
         int,
         typer.Option("--lora-rank", help="LoRA rank. Higher = more capacity, more VRAM."),
     ] = 32,
+    kl_coef: Annotated[
+        float,
+        typer.Option(
+            "--kl-coef",
+            help=(
+                "KL divergence penalty coefficient (beta in GRPOConfig). "
+                "Default 0.1 suppresses the large KL spikes seen with the ~0.04 TRL default "
+                "when class-weighted rewards are high (critical class weight = 8.0)."
+            ),
+        ),
+    ] = 0.1,
     save_steps: Annotated[
         int,
         typer.Option("--save-steps", help="Save a checkpoint every N steps."),
@@ -247,10 +266,27 @@ def main(
 
     dataset = Dataset.from_list(raw_records)
 
-    # Inject per-author system prompt into each prompt field
-    dataset = dataset.map(inject_system_prompts, batched=True, desc="Injecting system prompts")
+    # Pre-format prompts as strings using safe_apply_template so that:
+    # (a) Qwen3 thinking-mode injection is suppressed (enable_thinking=False)
+    # (b) GRPOTrainer receives strings and skips its internal apply_chat_template,
+    #     ensuring our formatting is not overridden and completions arrive as strings
+    #     (compatible with _completion_text in rewards.py)
+    template = _get_system_prompt_template()
 
-    typer.echo(f"  Dataset ready: {len(dataset)} records with system prompts.")
+    def format_prompts(batch: dict) -> dict:
+        return {"prompt": [
+            safe_apply_template(
+                tokenizer,
+                [{"role": "system", "content": template.format(author=a)}] + p,
+                tokenize=False,
+                add_generation_prompt=True,
+            )
+            for a, p in zip(batch["author"], batch["prompt"])
+        ]}
+
+    dataset = dataset.map(format_prompts, batched=True, desc="Formatting prompts")
+
+    typer.echo(f"  Dataset ready: {len(dataset)} records (pre-formatted strings).")
 
     # ------------------------------------------------------------------
     # 4. Configure GRPO training
@@ -272,6 +308,7 @@ def main(
         vllm_sampling_params=vllm_sampling_params,
         temperature=1.0,
         learning_rate=learning_rate,
+        beta=kl_coef,              # KL penalty; default 0.1 prevents large spikes
         weight_decay=0.01,
         warmup_ratio=0.05,
         lr_scheduler_type="cosine",
