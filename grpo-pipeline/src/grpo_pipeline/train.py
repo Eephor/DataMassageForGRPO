@@ -12,25 +12,23 @@ Rewards 2 and 3 are scaled by `length_scale` = (turn_index + 1) / total_turns,
 so early-turn judgments with little context contribute less to the gradient.
 Class weights compensate for the ~3.6:1 safe/non-safe dataset imbalance.
 
-Hardware targets
-----------------
-Phase 1 — prototype (default model):
-    unsloth/Llama-3.2-1B-Instruct
-    Free Colab T4 (16 GB) with UNSLOTH_VLLM_STANDBY=1
-    max_seq_length=2048, num_generations=4, batch_size=4
+Supported models and quantisation modes
+----------------------------------------
+The script detects the appropriate loading strategy from the model name:
 
-Phase 2 — scale up (pass --model):
-    unsloth/Qwen3-8B-Instruct
-    Colab Pro L4 (22 GB) or RTX 3090/4090 (24 GB)
-    Same script, same reward functions, no code changes
+  "fp8"   — unsloth/Llama-3.2-1B-Instruct, unsloth/Qwen3-8B
+              load_in_fp8=True, load_in_4bit=False
+              lora_alpha = lora_rank * 2
 
-Key alignment with Unsloth FP8 GRPO notebook
---------------------------------------------
-- fast_inference=True + max_lora_rank + load_in_fp8=True passed to from_pretrained
-- lora_alpha = lora_rank * 2  (Unsloth 2x convergence recommendation)
-- lora_dropout / bias omitted (Unsloth applies its own optimised defaults)
-- random_state = 3407 (Unsloth canonical seed)
-- Saves both LoRA adapter and merged 16-bit model
+  "16bit" — unsloth/Llama-3.2-3B-Instruct  (full-precision 16-bit LoRA)
+              load_in_fp8=False, load_in_4bit=False, gpu_memory_utilization=0.9
+              lora_alpha = lora_rank  (per Unsloth 3B notebook)
+              gradient_accumulation_steps = 4
+
+  "4bit"  — unsloth/DeepSeek-R1-0528-Qwen3-8B  (BitsAndBytes 4-bit)
+              load_in_fp8=False, load_in_4bit=True
+              lora_alpha = lora_rank * 2
+              gradient_accumulation_steps = 4
 
 Prerequisites
 -------------
@@ -45,14 +43,21 @@ Usage
     python -m grpo_pipeline.train \\
         --train-file ../transformed/train.jsonl \\
         --output-dir ../lora-adapter \\
-        --max-steps 350 \\
+        --max-steps 500 \\
         --kl-coef 0.1
 
-    # Scale to 8B:
+    # Llama 3.2 3B (16-bit LoRA, T4/L4):
     python -m grpo_pipeline.train \\
         --train-file ../transformed/train.jsonl \\
-        --output-dir ../lora-adapter-8b \\
-        --model unsloth/Qwen3-8B-Instruct \\
+        --output-dir ../lora-adapter-3b \\
+        --model unsloth/Llama-3.2-3B-Instruct \\
+        --max-steps 500
+
+    # DeepSeek-R1 (4-bit BnB, L4/A100):
+    python -m grpo_pipeline.train \\
+        --train-file ../transformed/train.jsonl \\
+        --output-dir ../lora-adapter-deepseek \\
+        --model unsloth/DeepSeek-R1-0528-Qwen3-8B \\
         --max-steps 500
 """
 
@@ -145,11 +150,13 @@ def main(
             "-m",
             help=(
                 "Unsloth model identifier. "
-                "Phase 1 default: unsloth/Llama-3.2-1B-Instruct (fits T4 16 GB). "
-                "Phase 2: unsloth/Qwen3-8B-Instruct (needs L4/A100 22+ GB)."
+                "FP8 (T4 14 GB): unsloth/Llama-3.2-1B-Instruct or unsloth/Qwen3-8B. "
+                "16-bit LoRA (T4/L4): unsloth/Llama-3.2-3B-Instruct. "
+                "4-bit BnB (L4/A100): unsloth/DeepSeek-R1-0528-Qwen3-8B. "
+                "Quantisation mode is inferred automatically from the model name."
             ),
         ),
-    ] = "unsloth/Llama-3.2-1B-Instruct",
+    ] = "unsloth/Llama-3.2-3B-Instruct",
     max_seq_length: Annotated[
         int,
         typer.Option("--max-seq-length", help="Maximum total sequence length (prompt + completion)."),
@@ -214,24 +221,47 @@ def main(
     )
 
     # ------------------------------------------------------------------
-    # 1. Load model + tokenizer
+    # 1. Detect quantisation mode from model name
     # ------------------------------------------------------------------
-    typer.echo(f"Loading model: {model}")
+    _name = model.lower()
+    if "deepseek" in _name or "-r1" in _name:
+        quant_mode = "4bit"
+    elif "llama" in _name and "3b" in _name:
+        quant_mode = "16bit"
+    else:
+        quant_mode = "fp8"
+
+    # lora_alpha: 16-bit LoRA uses rank (per Unsloth 3B notebook); others use rank×2
+    lora_alpha = lora_rank if quant_mode == "16bit" else lora_rank * 2
+    # gradient_accumulation_steps: 4 for large/16-bit models, 1 for small FP8
+    grad_accum = 4 if quant_mode in ("16bit", "4bit") else 1
+
+    # ------------------------------------------------------------------
+    # 2. Load model + tokenizer
+    # ------------------------------------------------------------------
+    typer.echo(f"Loading model: {model}  [{quant_mode}]")
     typer.echo(f"  max_seq_length={max_seq_length}, UNSLOTH_VLLM_STANDBY={os.environ.get('UNSLOTH_VLLM_STANDBY')}")
 
-    loaded_model, tokenizer = FastLanguageModel.from_pretrained(
+    _load_kwargs: dict = dict(
         model_name=model,
         max_seq_length=max_seq_length,
-        load_in_4bit=False,      # FP8, not 4-bit
-        fast_inference=True,     # enable vLLM rollout engine for GRPO
-        max_lora_rank=lora_rank, # pre-allocate LoRA memory at load time
-        load_in_fp8=True,        # Float8 quantisation — halves VRAM vs bfloat16
+        fast_inference=True,      # vLLM as GRPO rollout engine
+        max_lora_rank=lora_rank,  # pre-allocate vLLM memory for LoRA
     )
+    if quant_mode == "fp8":
+        _load_kwargs.update(load_in_fp8=True, load_in_4bit=False)
+    elif quant_mode == "16bit":
+        _load_kwargs.update(load_in_fp8=False, load_in_4bit=False,
+                            gpu_memory_utilization=0.9)
+    else:  # "4bit" — BitsAndBytes
+        _load_kwargs.update(load_in_fp8=False, load_in_4bit=True)
+
+    loaded_model, tokenizer = FastLanguageModel.from_pretrained(**_load_kwargs)
 
     # ------------------------------------------------------------------
-    # 2. Apply LoRA adapter
+    # 3. Apply LoRA adapter
     # ------------------------------------------------------------------
-    typer.echo(f"Applying LoRA (rank={lora_rank}, alpha={lora_rank * 2}) ...")
+    typer.echo(f"Applying LoRA (rank={lora_rank}, alpha={lora_alpha}) ...")
     loaded_model = FastLanguageModel.get_peft_model(
         loaded_model,
         r=lora_rank,
@@ -239,14 +269,14 @@ def main(
             "q_proj", "v_proj", "k_proj", "o_proj",
             "gate_proj", "up_proj", "down_proj",
         ],
-        lora_alpha=lora_rank * 2,          # 2x = faster convergence (Unsloth recommendation)
+        lora_alpha=lora_alpha,
         use_gradient_checkpointing="unsloth",
-        random_state=3407,                 # Unsloth canonical seed
+        random_state=3407,
         # lora_dropout and bias intentionally omitted — Unsloth optimised defaults apply
     )
 
     # ------------------------------------------------------------------
-    # 3. Load and prepare dataset
+    # 4. Load and prepare dataset
     # ------------------------------------------------------------------
     typer.echo(f"Loading training data from {train_file} ...")
     raw_records = load_train_dataset(train_file)
@@ -277,7 +307,7 @@ def main(
     typer.echo(f"  Dataset ready: {len(dataset)} records (pre-formatted strings).")
 
     # ------------------------------------------------------------------
-    # 4. Configure GRPO training
+    # 5. Configure GRPO training
     # ------------------------------------------------------------------
     max_prompt_length = max_seq_length - max_completion_length
 
@@ -297,29 +327,30 @@ def main(
         temperature=1.0,
         learning_rate=learning_rate,
         beta=kl_coef,              # KL penalty; default 0.1 prevents large spikes
-        weight_decay=0.01,
-        warmup_ratio=0.05,
+        weight_decay=0.1,
+        warmup_ratio=0.1,
         lr_scheduler_type="cosine",
         optim="adamw_8bit",
         logging_steps=1,
         per_device_train_batch_size=batch_size,
-        gradient_accumulation_steps=1,
+        gradient_accumulation_steps=grad_accum,
         num_generations=num_generations,
         max_prompt_length=max_prompt_length,
         max_completion_length=max_completion_length,
         max_steps=max_steps if max_steps > 0 else None,
         num_train_epochs=1 if max_steps <= 0 else None,
+        max_grad_norm=1.0,
         save_steps=save_steps,
         output_dir=str(output_dir),
         report_to=report_to,
     )
 
     # ------------------------------------------------------------------
-    # 5. Create trainer and train
+    # 6. Create trainer and train
     # ------------------------------------------------------------------
     typer.echo("Creating GRPOTrainer ...")
     typer.echo("  Reward functions: format_reward, safety_level_reward, group_reward")
-    typer.echo(f"  num_generations={num_generations}, batch_size={batch_size}")
+    typer.echo(f"  num_generations={num_generations}, batch_size={batch_size}, grad_accum={grad_accum}")
     typer.echo(f"  max_prompt_length={max_prompt_length}, max_completion_length={max_completion_length}")
 
     trainer = GRPOTrainer(
@@ -339,7 +370,7 @@ def main(
     trainer.train()
 
     # ------------------------------------------------------------------
-    # 6. Save LoRA adapter and merged 16-bit model
+    # 7. Save LoRA adapter and merged 16-bit model
     # ------------------------------------------------------------------
     output_dir.mkdir(parents=True, exist_ok=True)
     merged_dir = output_dir.parent / (output_dir.name + "-merged-16bit")
