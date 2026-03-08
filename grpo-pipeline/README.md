@@ -58,6 +58,12 @@ cd grpo-pipeline
 **Manual steps:**
 
 ```bash
+# Step 0 (recommended): create a .env file from the template
+cp .env.example .env
+# Fill in GRPO_MODEL and any API keys you need.
+# train.py loads it automatically via python-dotenv — no manual `export` needed.
+# Shell exports and CI env vars always take precedence over .env values.
+
 # Step 1: install Unsloth + vLLM (platform-specific CUDA wheels, do this first)
 pip install unsloth vllm
 pip install --no-deps trl==0.22.2
@@ -66,7 +72,7 @@ pip install --no-deps trl==0.22.2
 uv pip install -e ".[train]"
 
 # Step 3: train with GRPO
-# If no --model flag is given, GRPO_MODEL env var is checked, then an interactive menu is shown.
+# Model resolution order: --model flag > GRPO_MODEL env var (.env or shell) > interactive menu.
 python -m grpo_pipeline.train \
     --train-file ../transformed/train.jsonl \
     --output-dir ../lora-adapter
@@ -351,11 +357,17 @@ docker build -t moltbook-grpo .
 
 ### Run with Docker Compose (recommended)
 
+`docker-compose.yml` reads `.env` automatically via the `env_file` directive — copy `.env.example` once and fill in what you need:
+
 ```bash
-# Default model (Llama-3.2-3B-Instruct):
+cp .env.example .env   # fill in GRPO_MODEL, API keys, etc.
+```
+
+```bash
+# Default model (Llama-3.2-3B-Instruct, or whatever GRPO_MODEL is set to in .env):
 docker compose up
 
-# Choose a different model via env var:
+# Override the model for a single run without editing .env:
 GRPO_MODEL=unsloth/Llama-3.2-1B-Instruct docker compose up
 
 # With HuggingFace push:
@@ -443,6 +455,16 @@ Writes one `{author}.json` per unique author to `../bot-profiles/`. Rerun only w
 All share the constructor signature `Backend(model: str)`. Use the `make_backend(name, model)` factory to instantiate from CLI flags or notebook config.
 
 All LLM SDK packages are **lazy-imported** — nothing is imported unless the corresponding backend is actually used. Training without `--use-llm-bots` has zero new import overhead.
+
+**API keys** are read from standard environment variables (`ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, `GOOGLE_API_KEY`). Set them in `.env` (script / compose) or export them in your shell:
+
+```bash
+# In .env (recommended — train.py and docker-compose.yml both load it):
+ANTHROPIC_API_KEY=sk-ant-...
+
+# Or as a one-off shell export:
+export ANTHROPIC_API_KEY=sk-ant-...
+```
 
 Install the optional extras for cloud backends:
 
