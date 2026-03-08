@@ -1,6 +1,6 @@
 ---
 name: LLM Bot Training Environment
-overview: Add an optional LLM-powered bot simulation layer to the training environment. Each participant bot is given an auto-generated persona prompt (traits from the Ethos Academy taxonomy + few-shot examples from their historical messages) and calls a configurable LLM API to generate new utterances. An oracle evaluator scores each synthetic message to produce ground-truth labels. A single flag switches between the existing free (replay) mode and this paid LLM mode.
+overview: Optional LLM-powered bot simulation layer — fully implemented. Each participant bot carries an auto-generated persona prompt (Ethos Academy traits + few-shot examples) and calls a configurable LLM API. An oracle evaluator scores each synthetic message for ground-truth labels. A single flag (--use-llm-bots / USE_LLM_BOTS) switches between the free replay mode and this paid mode. Follow-up work added .env.example, docker-compose env_file support, and python-dotenv auto-loading in train.py.
 todos:
   - id: bot-profiles
     content: "Create bot_profiles.py: scan raw-data by author, extract avg_traits + few-shot examples, build trait_description from Ethos taxonomy, write CLI and build_profiles entrypoint"
@@ -22,6 +22,9 @@ todos:
     status: completed
   - id: readme-llm-section
     content: Add LLM Bot Mode section to README.md documenting build_profiles, backends, env vars, and cost characteristics
+    status: completed
+  - id: env-dotenv
+    content: "Add .env.example, update docker-compose.yml env_file, add python-dotenv to train.py and pyproject.toml base deps"
     status: completed
 isProject: false
 ---
@@ -285,9 +288,40 @@ llm-bots = ["anthropic>=0.50", "openai>=1.60", "google-generativeai>=0.8"]
 
 - `grpo-pipeline/src/grpo_pipeline/bot_profiles.py` — new: profile extraction CLI + persona builder
 - `grpo-pipeline/src/grpo_pipeline/llm_bots.py` — new: LLMBackend, LLMParticipantBot, OracleEvaluator, LLMConversationEnvironment
-- `grpo-pipeline/src/grpo_pipeline/simulation.py` — add `create_with_llm_bots()` classmethod
-- `grpo-pipeline/src/grpo_pipeline/train.py` — add 6 new flags, branch in data-loading section
+- `grpo-pipeline/src/grpo_pipeline/simulation.py` — add `create_with_llm_bots()` and `_generate_llm()` alongside existing `create()`
+- `grpo-pipeline/src/grpo_pipeline/train.py` — add 6 new flags, branch in data-loading section; dotenv load at startup
 - `grpo-pipeline/train.ipynb` — extend Section 2 and Section 4
-- `grpo-pipeline/pyproject.toml` — add `llm-bots` optional extra
-- `grpo-pipeline/README.md` — add LLM Bot Mode section
+- `grpo-pipeline/pyproject.toml` — add `llm-bots` optional extra; add `python-dotenv` to base deps
+- `grpo-pipeline/README.md` — add LLM Bot Mode section; document .env workflow in script and Docker sections
+- `grpo-pipeline/.env.example` — new: template for all env vars (model, HF, LLM keys, W&B)
+- `grpo-pipeline/docker-compose.yml` — add `env_file: .env` + all new env vars to environment block
 - No changes to `rewards.py`, `models.py`, `transform.py`, or `split.py`
+
+---
+
+## Environment Variable Configuration (follow-up)
+
+### `.env.example`
+
+Template covering all three usage tiers — copy to `.env` and fill in what you need:
+
+```bash
+cp grpo-pipeline/.env.example grpo-pipeline/.env
+```
+
+| Variable | Used by | Notes |
+|---|---|---|
+| `GRPO_MODEL` | train.py | Overrides interactive model menu |
+| `HF_TOKEN` / `HF_USERNAME` | train.py | Only needed for `--push-to-hub` |
+| `ANTHROPIC_API_KEY` | ClaudeBackend | Only needed with `--use-llm-bots --participant-backend claude` |
+| `OPENAI_API_KEY` | OpenAIBackend | Only needed with `--participant-backend openai` |
+| `GOOGLE_API_KEY` | GeminiBackend | Only needed with `--participant-backend gemini` |
+| `WANDB_API_KEY` / `WANDB_PROJECT` / `WANDB_ENTITY` | train.py | Only needed with `--report-to wandb` |
+
+OllamaBackend needs no API key (calls `http://localhost:11434`).
+
+### How it loads
+
+- **Script / `uv run`**: `train.py` calls `load_dotenv(override=False)` at startup via `python-dotenv` (base dep). `.env` is searched from the current working directory upward. Shell exports and CI env vars always win (`override=False`).
+- **Docker Compose**: `docker-compose.yml` has `env_file: .env` (with `required: false`). Inline `environment:` values serve as fallback defaults so training works without a `.env` file.
+- **LLM bot mode / simulation mode**: These are **not** auto-inferred from the presence of API keys — they require explicit `--use-llm-bots` / `--raw-data-dir` flags (or `USE_LLM_BOTS` / `USE_LIVE_SIM` in the notebook). Explicit activation was a deliberate design choice to avoid surprises when API keys happen to be set globally.

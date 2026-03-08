@@ -1,6 +1,6 @@
 ---
 name: Conversation Simulation Environment
-overview: Add a live simulation layer that runs during training. ParticipantBots replay historical threads turn-by-turn into a ConversationEnvironment; a SimulatedDataset wraps this as a streaming HuggingFace IterableDataset fed directly to GRPOTrainer — replacing the static transformed JSONL as the training data source.
+overview: Live simulation layer that runs during training. ParticipantBots replay historical threads turn-by-turn into a ConversationEnvironment; SimulatedDataset wraps this as a streaming HuggingFace IterableDataset fed directly to GRPOTrainer. The ParticipantBot ABC is designed to also back LLM-powered bots (implemented in memory 10). All todos completed and unit-tested.
 todos:
   - id: simulation-module
     content: "Create grpo-pipeline/src/grpo_pipeline/simulation.py: ParticipantBot, ConversationEnvironment, and SimulatedDataset (IterableDataset generator)"
@@ -9,10 +9,13 @@ todos:
     content: Add --raw-data-dir and --min-context-turns flags to train.py; when --raw-data-dir is set, load from SimulatedDataset instead of static JSONL
     status: completed
   - id: notebook-update
-    content: Add USE_LIVE_SIM toggle to train.ipynb Section 4 (Load & Prepare Training Data) that swaps Dataset.from_list() for SimulatedDataset.create()
+    content: Add USE_LIVE_SIM toggle to train.ipynb Section 2 (config) and Section 4 (data loading)
     status: completed
   - id: readme-update
     content: Update grpo-pipeline/README.md to document the live simulation mode and min_context_turns
+    status: completed
+  - id: unit-tests
+    content: "Write tests/test_simulation.py: ReplayBot, ConversationEnvironment, min_context_turns, SimulatedDataset, equivalence with transform.py output"
     status: completed
 isProject: false
 ---
@@ -54,7 +57,9 @@ Three components:
 ```python
 class ParticipantBot:
     author: str
-    def next_message(self) -> ConversationRecord | None: ...
+    # context_so_far is optional so ReplayBot (which ignores it) and
+    # LLMParticipantBot (which needs it) share the same interface
+    def next_message(self, context_so_far: list[ConversationRecord] | None = None) -> ConversationRecord | None: ...
     def is_exhausted(self) -> bool: ...
 
 class ReplayBot(ParticipantBot):
@@ -80,24 +85,29 @@ class SimulatedDataset:
         """Infinite generator: shuffles threads each epoch, yields GRPORecord dicts."""
         rng = random.Random(seed)
         while True:
-            threads = load_all_conversation_threads(raw_data_dir)
+            threads = load_all_threads(raw_data_dir)
             rng.shuffle(threads)
-            for thread in threads:
-                env = ConversationEnvironment(thread)
-                for record in env.run_to_records(min_context_turns):
+            for thread_id, source_file, messages in threads:
+                env = ConversationEnvironment(thread_id, messages)
+                for record in env.run_to_records(source_file, min_context_turns):
                     yield record.model_dump()
 
     @staticmethod
-    def create(raw_data_dir, min_context_turns=0, seed=42) -> IterableDataset:
-        return IterableDataset.from_generator(
-            SimulatedDataset.generate,
-            gen_kwargs={"raw_data_dir": raw_data_dir,
-                        "min_context_turns": min_context_turns,
-                        "seed": seed}
-        )
+    def collect_one_epoch(raw_data_dir, min_context_turns=0) -> list[dict]:
+        """Single deterministic epoch — used for SFT warmup and offline inspection."""
+
+    @classmethod
+    def create(cls, raw_data_dir, min_context_turns=0, seed=42) -> IterableDataset:
+        return IterableDataset.from_generator(cls.generate, gen_kwargs={...})
+
+    @classmethod
+    def create_with_llm_bots(cls, raw_data_dir, bot_profiles_dir,
+                              participant_backend, oracle_backend,
+                              min_context_turns=0, seed=42) -> IterableDataset:
+        """LLM bot variant — see memory 10."""
 ```
 
-Because the generator loops infinitely and yields `GRPORecord`-shaped dicts, GRPOTrainer receives the exact same column schema it currently reads from `train.jsonl`. The `format_prompts` map (which injects the system prompt and applies the chat template) is applied on top of this dataset unchanged.
+The generator loops infinitely; GRPOTrainer receives the exact same column schema as `train.jsonl`. `format_prompts` is applied on top unchanged. `collect_one_epoch` returns a plain `list[dict]` for SFT warmup sampling when `--raw-data-dir` is set (the `IterableDataset` is not indexable).
 
 ## Changes to `[train.py](grpo-pipeline/src/grpo_pipeline/train.py)`
 
@@ -153,18 +163,26 @@ The `min_context_turns` parameter gates out early turns that carry noisy signal 
 
 No changes needed to `transform.py` for this plan.
 
-## Future Extension: LLM-Powered Bots
+## Unit Tests
 
-The `ParticipantBot` abstract base class is designed so an `LLMParticipantBot` can be added later:
+`grpo-pipeline/tests/test_simulation.py` (58 tests, all passing). Key coverage:
 
-- Calls an LLM API to generate the next utterance given thread context + author persona
-- A companion oracle evaluator (e.g. Claude API) generates the ground-truth label for the synthetic message
-- The `ConversationEnvironment` and `SimulatedDataset` require no changes — they just call `bot.next_message()`
+- `ReplayBot` message ordering and exhaustion
+- `ConversationEnvironment.step()` — context growth, turn ordering
+- `run_to_records()` — chronological order, `min_context_turns` filtering, messages without evaluations skipped
+- Equivalence with `transform.py` output from the oversight agent's POV (prompt format, system prompt injection, `length_scale`)
+- `SimulatedDataset` schema, infinite generation, per-epoch shuffle reproducibility
+- Integration test against real raw-data files
+
+## LLM-Powered Bots Extension
+
+Implemented — see memory 10. `ParticipantBot.next_message()` accepts `context_so_far` so `LLMParticipantBot` can use it; `ReplayBot` ignores it. `SimulatedDataset.create_with_llm_bots()` added alongside the existing `create()`.
 
 ## Files Touched
 
-- `grpo-pipeline/src/grpo_pipeline/simulation.py` — new file
-- `grpo-pipeline/src/grpo_pipeline/train.py` — add `--raw-data-dir` and `--min-context-turns`
-- `grpo-pipeline/train.ipynb` — add `USE_LIVE_SIM` toggle to Section 4
-- `grpo-pipeline/README.md` — document live simulation mode
+- `grpo-pipeline/src/grpo_pipeline/simulation.py` — new file; updated with `create_with_llm_bots()` and `_generate_llm()` in follow-up
+- `grpo-pipeline/src/grpo_pipeline/train.py` — `--raw-data-dir`, `--min-context-turns` (+ LLM bot flags in follow-up)
+- `grpo-pipeline/train.ipynb` — `USE_LIVE_SIM` toggle in Section 2 and Section 4
+- `grpo-pipeline/tests/test_simulation.py` — new file (58 tests)
+- `grpo-pipeline/README.md` — live simulation mode documented
 - No changes to `rewards.py`, `models.py`, `split.py`, or `transform.py`
