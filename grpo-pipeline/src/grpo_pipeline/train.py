@@ -70,6 +70,12 @@ Usage
         --model unsloth/Llama-3.2-3B-Instruct \\
         --max-steps 500
 
+    # Live simulation mode (no pre-transformed JSONL needed — streams from raw-data)
+    python -m grpo_pipeline.train \\
+        --raw-data-dir ../raw-data \\
+        --output-dir ../lora-adapter \\
+        --min-context-turns 1
+
     # With SFT warmup and HuggingFace push
     python -m grpo_pipeline.train \\
         --model unsloth/Llama-3.2-3B-Instruct \\
@@ -309,8 +315,39 @@ _UNSET_INT = -9999
 def main(
     train_file: Annotated[
         Path,
-        typer.Option("--train-file", "-i", help="Path to train.jsonl produced by split.py."),
+        typer.Option(
+            "--train-file", "-i",
+            help=(
+                "Path to train.jsonl produced by split.py. "
+                "Ignored when --raw-data-dir is set."
+            ),
+        ),
     ] = Path("../transformed/train.jsonl"),
+    raw_data_dir: Annotated[
+        Optional[Path],
+        typer.Option(
+            "--raw-data-dir",
+            help=(
+                "Directory containing raw batch_conversations*.jsonl files. "
+                "When set, enables live simulation mode: GRPOTrainer is fed a streaming "
+                "IterableDataset that replays conversation threads turn-by-turn during "
+                "training instead of reading a pre-transformed static JSONL. "
+                "The transform.py / split.py steps are not required when this flag is used."
+            ),
+        ),
+    ] = None,
+    min_context_turns: Annotated[
+        int,
+        typer.Option(
+            "--min-context-turns",
+            help=(
+                "Minimum number of preceding turns required before a training sample is "
+                "emitted by the simulation. Use 1 to ensure the oversight agent always "
+                "has at least one prior message as context (recommended). Only applies "
+                "when --raw-data-dir is set."
+            ),
+        ),
+    ] = 0,
     output_dir: Annotated[
         Path,
         typer.Option("--output-dir", "-o", help="Directory to save the LoRA adapter."),
@@ -463,11 +500,17 @@ def main(
         lr_scheduler = "cosine"
         weight_decay = 0.1
 
+    data_source_label = (
+        f"live sim: {raw_data_dir}  (min_context_turns={min_context_turns})"
+        if raw_data_dir is not None
+        else str(train_file)
+    )
+
     typer.echo(f"\n{'='*60}")
     typer.echo(f"  Moltbook Oversight Agent — GRPO Training")
     typer.echo(f"{'='*60}")
     typer.echo(f"  Model:          {resolved_model}  [{quant_mode}]")
-    typer.echo(f"  Train file:     {train_file}")
+    typer.echo(f"  Data source:    {data_source_label}")
     typer.echo(f"  Output dir:     {output_dir}")
     typer.echo(f"  lora_rank:      {effective_lora_rank}  alpha={lora_alpha}")
     typer.echo(f"  batch_size:     {effective_batch}  grad_accum={grad_accum}")
@@ -516,10 +559,6 @@ def main(
     # ------------------------------------------------------------------
     # 5. Load and prepare dataset
     # ------------------------------------------------------------------
-    typer.echo(f"Loading training data from {train_file} ...")
-    raw_records = load_train_dataset(train_file)
-    typer.echo(f"  Loaded {len(raw_records)} records.")
-
     system_prompt_template = _get_system_prompt_template()
 
     def format_prompts(batch: dict) -> dict:
@@ -533,9 +572,32 @@ def main(
             for a, p in zip(batch["author"], batch["prompt"])
         ]}
 
-    dataset = Dataset.from_list(raw_records)
-    dataset = dataset.map(format_prompts, batched=True, desc="Formatting prompts")
-    typer.echo(f"  Dataset ready: {len(dataset)} records (pre-formatted strings).")
+    if raw_data_dir is not None:
+        from grpo_pipeline.simulation import SimulatedDataset  # noqa: PLC0415
+
+        typer.echo(f"Live simulation mode: streaming from {raw_data_dir} ...")
+        typer.echo(f"  min_context_turns={min_context_turns}")
+        raw_dataset = SimulatedDataset.create(
+            raw_data_dir=raw_data_dir,
+            min_context_turns=min_context_turns,
+        )
+        dataset = raw_dataset.map(format_prompts, batched=True)
+        typer.echo("  Streaming dataset ready (infinite generator, stopped by max_steps).")
+
+        # Collect one static epoch for SFT warmup sampling — we need a list of
+        # dicts to sample from, and the IterableDataset generator is not indexable.
+        raw_records = (
+            SimulatedDataset.collect_one_epoch(raw_data_dir, min_context_turns=0)
+            if warmup_examples > 0
+            else []
+        )
+    else:
+        typer.echo(f"Loading training data from {train_file} ...")
+        raw_records = load_train_dataset(train_file)
+        typer.echo(f"  Loaded {len(raw_records)} records.")
+        dataset = Dataset.from_list(raw_records)
+        dataset = dataset.map(format_prompts, batched=True, desc="Formatting prompts")
+        typer.echo(f"  Dataset ready: {len(dataset)} records (pre-formatted strings).")
 
     # ------------------------------------------------------------------
     # 6. Optional SFT format warmup

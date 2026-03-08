@@ -6,12 +6,13 @@ Transforms Ethos Academy scored conversation data into TRL `GRPOTrainer`-ready d
 
 ```
 src/grpo_pipeline/
-├── models.py     # Pydantic schemas for source JSONL records and GRPORecord output
-├── transform.py  # Thread reconstruction + GRPO prompt formatting
-├── split.py      # Thread-level train/test splitting (no leakage)
-├── rewards.py    # GRPO reward functions + safe_apply_template helper
-├── train.py      # GRPO training script (Unsloth + TRL GRPOTrainer) — CLI entry point
-└── baseline.py   # Headless batch evaluation against test set
+├── models.py       # Pydantic schemas for source JSONL records and GRPORecord output
+├── transform.py    # Thread reconstruction + GRPO prompt formatting (offline pipeline)
+├── simulation.py   # Live simulation: ParticipantBot, ConversationEnvironment, SimulatedDataset
+├── split.py        # Thread-level train/test splitting (no leakage)
+├── rewards.py      # GRPO reward functions + safe_apply_template helper
+├── train.py        # GRPO training script (Unsloth + TRL GRPOTrainer) — CLI entry point
+└── baseline.py     # Headless batch evaluation against test set
 train.ipynb       # Interactive training notebook (Colab)
 evaluate.ipynb    # Interactive notebook: single-record inspection + metrics table
 setup.sh          # One-command VM/bare-metal setup + optional training launch
@@ -95,6 +96,55 @@ python -m grpo_pipeline.baseline \
 ```
 
 For interactive single-record inspection and side-by-side comparison, open `evaluate.ipynb` in Colab or JupyterLab.
+
+## Live Simulation Mode
+
+Instead of training on a pre-transformed static JSONL, you can stream training data live from the raw conversation files. In this mode the oversight agent observes each conversation thread **turn-by-turn** as the participants post their messages — mirroring the real-life deployment scenario where the agent monitors conversations as they unfold.
+
+### How it works
+
+`simulation.py` introduces three components that replace the static data pipeline during training:
+
+- **`ReplayBot`** — wraps one author's historical messages and emits them one at a time in chronological order. The abstract `ParticipantBot` base class is designed for future LLM-powered subclasses that generate utterances on-the-fly.
+- **`ConversationEnvironment`** — manages a single thread. Each `step()` call pops the next chronological message, appends it to the running context, and returns the new state. Only messages with a usable evaluation are replayed.
+- **`SimulatedDataset`** — wraps the environment in a HuggingFace `IterableDataset` generator. It loops indefinitely, shuffling threads each epoch, and yields `GRPORecord`-shaped dicts with the same column schema as `transformed/train.jsonl`. The `format_prompts` map and all reward functions are unchanged.
+
+### CLI
+
+Pass `--raw-data-dir` to `train.py` to enable live simulation. The `--train-file` flag is ignored when this is set.
+
+```bash
+python -m grpo_pipeline.train \
+    --raw-data-dir ../raw-data \
+    --output-dir ../lora-adapter \
+    --min-context-turns 1
+```
+
+`--min-context-turns N` skips training samples where fewer than N messages precede the target turn. This prevents the oversight agent from receiving gradient signal from turns where not enough context is available to make a reliable judgment:
+
+| `--min-context-turns` | Effect |
+|---|---|
+| `0` (default) | All turns emitted — identical signal to the static pipeline |
+| `1` | First message of each thread skipped; agent always has ≥ 1 prior message |
+| `2` | Two preceding messages required before emitting a training sample |
+
+`turn_index`, `total_turns`, and `length_scale` are preserved from the original thread position regardless of this filter, so reward weighting remains consistent.
+
+### Notebook
+
+In `train.ipynb` (Section 2 — Configuration), set:
+
+```python
+USE_LIVE_SIM      = True          # False = static train.jsonl (default)
+RAW_DATA_DIR      = '../raw-data'
+MIN_CONTEXT_TURNS = 1
+```
+
+Section 4 branches automatically. The `transform.py` / `split.py` preprocessing steps are not required when `USE_LIVE_SIM = True`.
+
+### Batch files
+
+Non-conversation files (`batch_all*.jsonl`, `batch_shady*.jsonl`, etc.) are silently skipped by the simulation — they have no thread context to replay. They remain accessible via the static `transform.py` pipeline.
 
 ## Canonical Output Directory
 
