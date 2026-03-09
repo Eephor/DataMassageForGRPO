@@ -1,6 +1,6 @@
 # Eephor: an oversight agent to tell apart good bots from bad on MoltBook or any other multi agent scenarios
 
-Transforms [Ethos Academy](https://github.com/allierays/ethos-academy) conversational data (**MoltBook** scrape + a lot of data analytics) into reinforcement learning datasets to train Large Language Models (LLMs) as advanced **Agentic Oversight Mechanisms** using **Group Relative Policy Optimization (GRPO)**.
+This project provides an end-to-end pipeline for developing advanced **Agentic Oversight Mechanisms**, encompassing data transformation, model training, and evaluation. It begins by transforming [Ethos Academy](https://github.com/allierays/ethos-academy) conversational data (**MoltBook** scrape + a lot of data analytics) into structured datasets. These datasets are then used to train Large Language Models (LLMs) through a rigorous process involving Parameter-Efficient Fine-Tuning (PEFT) with LoRA (Low-Rank Adaptation) for a Supervised Fine-Tuning (SFT) warmup, alongside reinforcement learning via **Group Relative Policy Optimization (GRPO)** within OpenEnv, culminating in comprehensive model evaluation.
 
 ## Project Overview
 
