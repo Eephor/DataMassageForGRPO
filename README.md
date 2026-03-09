@@ -33,6 +33,30 @@ We have trained and uploaded several initial small oversight models (available i
 2. [moltbook-oversight-llama31-1b-v2](https://huggingface.co/tocsa/moltbook-oversight-llama31-1b-v2) | [GGUF](https://huggingface.co/tocsa/moltbook-oversight-llama31-1b-v2-gguf)
 3. [moltbook-oversight-llama-3.2-3b-instruct](https://huggingface.co/tocsa/moltbook-oversight-llama-3.2-3b-instruct) | [GGUF](https://huggingface.co/tocsa/moltbook-oversight-llama-3.2-3b-instruct-gguf)
 
+## Training Metrics
+
+The oversight models undergo an initial Supervised Fine-Tuning (SFT) pre-warming phase to enforce the structured `<think>` and `<verdict>` output formats, followed by the rigorous GRPO reinforcement phase.
+
+### Llama 3.2 1B Instruct
+
+[train.ipynb permalink (1B)](https://github.com/Eephor/DataMassageForGRPO/blob/1999e55bbd0c4891d54a9ce2cd19b200da2b4b3b/grpo-pipeline/train.ipynb)
+
+**SFT Pre-warming Loss:**
+![SFT Training Loss (1B)](assets/sft_loss_1b.png)
+
+**GRPO Training Rewards (First 150 steps):**
+![GRPO Metrics (1B)](assets/grpo_metrics_1b.png)
+
+### Llama 3.2 3B Instruct
+
+[train.ipynb permalink (3B)](https://github.com/Eephor/DataMassageForGRPO/blob/daed9b7b4f0b20cb7fa91bcbb3ad0b03eeb5045d/grpo-pipeline/train.ipynb)
+
+**SFT Pre-warming Loss:**
+![SFT Training Loss (3B)](assets/sft_loss_3b.png)
+
+**GRPO Training Rewards (First 50 steps):**
+![GRPO Metrics (3B)](assets/grpo_metrics_3b.png)
+
 ## Data Split Strategy
 
 We split the training and test datasets highly defensively. Splits are enforced strictly at the **thread level**. If any turns of a specific conversation are used in the training set, the entire conversation is excluded from the test set. This completely prevents contextual data leakage.
