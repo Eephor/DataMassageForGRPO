@@ -1,6 +1,10 @@
 # Eephor: an oversight agent to tell apart good bots from bad on MoltBook or any other multi agent scenarios
 
-This project provides an end-to-end pipeline for developing specialized **Large Language Models for Oversight**—agents that can be deployed within a harness for judgment or guardrailing purposes. The pipeline encompasses data transformation, model training, and evaluation. It begins by transforming [Ethos Academy](https://github.com/allierays/ethos-academy) conversational data (**MoltBook** scrape + a lot of data analytics) into structured datasets. These datasets are then used to train the LLMs through a rigorous process involving Parameter-Efficient Fine-Tuning (PEFT) with LoRA (Low-Rank Adaptation) for a Supervised Fine-Tuning (SFT) warmup, alongside reinforcement learning via **Group Relative Policy Optimization (GRPO)** within OpenEnv, culminating in comprehensive model evaluation.
+This project provides an end-to-end pipeline for developing specialized **Large Language Models for Oversight**—agents that can be deployed within a harness for judgment or guardrailing purposes. The pipeline encompasses data transformation, model training, and evaluation.
+
+It begins by transforming [Ethos Academy](https://github.com/allierays/ethos-academy) conversational data (**MoltBook** scrape + a lot of data analytics) into structured datasets containing verifiable ground-truth labels. These labels originally comprise 12 complex traits and alignment data, which our pipeline processes and bucketizes into actionable reward signal targets. The prepared datasets are then used to train the LLMs through a rigorous process that involves Parameter-Efficient Fine-Tuning (PEFT) with LoRA (Low-Rank Adaptation) for a Supervised Fine-Tuning (SFT) warmup phase.
+
+Following the SFT warmup, the pipeline applies **Reinforcement Learning with Verifiable Rewards (RLVR)** via **Group Relative Policy Optimization (GRPO)** within OpenEnv. By leveraging deterministic, verifiable ground-truth for rewards instead of a learned reward model, this approach effectively prevents reward hacking during reinforcement learning while enabling the agent to explore and optimize its own reasoning paths, culminating in comprehensive model evaluation.
 
 ## Project Overview
 

@@ -237,9 +237,16 @@ dataset = dataset.map(format_prompts, batched=True)
 
 When `dataset['prompt']` holds **strings**, `GRPOTrainer` does not re-apply the chat template internally — essential for these model-specific fixes to take effect.
 
-## Reward Functions
+## Reward Functions & RLVR
 
-Three GRPO reward functions in `rewards.py`, each with signature `(prompts, completions, **kwargs) -> list[float]`:
+This pipeline leverages **Reinforcement Learning with Verifiable Rewards (RLVR)**. By using a dataset with verifiable ground-truth labels (derived by processing and bucketizing complex 12-trait and alignment data) to compute rewards, the model undergoes true reinforcement learning (rather than just supervised learning). It learns to maximize a perfect, deterministic reward signal, which yields several key advantages:
+
+1. **Policy Improvement through Interaction**: The LLM generates a response (action) and receives feedback based purely on whether it matches the verifiable ground-truth.
+2. **Path Exploration**: Unlike SFT where the exact answer structure is forced, RLVR allows the model to explore and discover its own reasoning paths (e.g., inside the `<think>` block) to arrive at the correct structured verdict.
+3. **No Critic Model Required**: GRPO computes the policy advantage simply by comparing the mean and standard deviation of rewards across multiple generated responses for the same prompt, eliminating the high memory overhead of a separate reward network.
+4. **Prevents Reward Hacking**: Because rewards are deterministically tied directly to the ground-truth answers, the model cannot easily "trick" the system into dispensing high scores for bad answers—a common vulnerability in standard RLHF with learned reward models.
+
+There are three GRPO reward functions in `rewards.py`, each with signature `(prompts, completions, **kwargs) -> list[float]`:
 
 | Function | Max value | Scaled by `length_scale`? | Purpose |
 |---|---|---|---|
