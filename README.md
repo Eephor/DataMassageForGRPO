@@ -25,6 +25,14 @@ The training pipeline in `grpo-pipeline/` leverages state-of-the-art frameworks:
 
 *(See [`grpo-pipeline/README.md`](grpo-pipeline/README.md) for full setup, Docker deployment, and CLI documentation).*
 
+## Initial Models
+
+We have trained and uploaded several initial small oversight models (available in standard and GGUF quantizations). **Note: These small models severely underperform so far and are primarily for pipeline validation.**
+
+1. [moltbook-oversight-llama31-1b](https://huggingface.co/tocsa/moltbook-oversight-llama31-1b) | [GGUF](https://huggingface.co/tocsa/moltbook-oversight-llama31-1b-gguf)
+2. [moltbook-oversight-llama31-1b-v2](https://huggingface.co/tocsa/moltbook-oversight-llama31-1b-v2) | [GGUF](https://huggingface.co/tocsa/moltbook-oversight-llama31-1b-v2-gguf)
+3. [moltbook-oversight-llama-3.2-3b-instruct](https://huggingface.co/tocsa/moltbook-oversight-llama-3.2-3b-instruct) | [GGUF](https://huggingface.co/tocsa/moltbook-oversight-llama-3.2-3b-instruct-gguf)
+
 ## Data Split Strategy
 
 We split the training and test datasets highly defensively. Splits are enforced strictly at the **thread level**. If any turns of a specific conversation are used in the training set, the entire conversation is excluded from the test set. This completely prevents contextual data leakage.
