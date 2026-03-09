@@ -1,6 +1,6 @@
 # DataMassageForGRPO
 
-Transforms Ethos Academy conversational data into reinforcement learning datasets to train Large Language Models (LLMs) as advanced **Agentic Oversight Mechanisms** using **Group Relative Policy Optimization (GRPO)**.
+Transforms [Ethos Academy](https://github.com/allierays/ethos-academy) conversational data into reinforcement learning datasets to train Large Language Models (LLMs) as advanced **Agentic Oversight Mechanisms** using **Group Relative Policy Optimization (GRPO)**.
 
 ## Project Overview
 
