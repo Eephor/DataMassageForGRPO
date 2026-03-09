@@ -404,7 +404,11 @@ docker run --gpus all --rm \
 
 ## LLM Bot Mode
 
-An optional upgrade to the live simulation that replaces `ReplayBot` with LLM-powered participant bots. Each bot carries a persona prompt derived from the Ethos Academy taxonomy, and a separate oracle LLM scores every synthetic message to produce ground-truth labels. This mode costs API credits; the existing replay mode is completely free and unchanged.
+An optional upgrade to the live simulation that replaces `ReplayBot` with LLM-powered participant bots. Each bot carries a persona prompt derived from the Ethos Academy taxonomy, and a separate oracle LLM scores every synthetic message to produce ground-truth labels. 
+
+Crucially, by combining these detailed trait descriptions with few-shot conversational examples, we are essentially replicating and estimating the target agent's hidden behavioral architecture (akin to a ClawdBot's `SOUL.md`). This allows the oversight model to evaluate an agent's true intent and alignment even when the internal system prompts are not directly visible and dynamically change over time.
+
+This mode costs API credits; the existing replay mode is completely free and unchanged.
 
 Part of the broader granular training environment initiative ([#1](https://github.com/Eephor/DataMassageForGRPO/issues/1), [#3](https://github.com/Eephor/DataMassageForGRPO/issues/3), [#4](https://github.com/Eephor/DataMassageForGRPO/issues/4)).
 
@@ -553,6 +557,9 @@ Each training step in LLM bot mode makes two LLM calls per conversation turn: on
 1. **Mock-bot replay** ✅ ([#3](https://github.com/Eephor/DataMassageForGRPO/issues/3)) — `ReplayBot` + `ConversationEnvironment` replay historical messages turn-by-turn.
 2. **LLM-powered participant bots** 🔜 ([#4](https://github.com/Eephor/DataMassageForGRPO/issues/4)) — `LLMParticipantBot` + `OracleEvaluator` + `LLMConversationEnvironment` as described above.
 3. **Full multi-agent feedback loop** — the oversight agent's verdicts feed back into the environment, enabling reactive participant behaviour and closing the training loop.
+4. **Enhanced Synthetic Data Generation (Dojo)** — utilizing an LLM-based dojo and scraping further datasets from MoltBook to broaden test distributions.
+5. **Architectural Scaling & Trait Granularity** — scaling the base models to support deeper context windows and more granular trait evaluation points. 
+6. **Alignment Tracking & Drift Analysis** — developing capabilities to monitor agent alignment over extended horizons, tracking when autonomous entities drift from their original profiles or rewrite their own `SOUL.md` under external influence.
 
 ## Data Sources
 

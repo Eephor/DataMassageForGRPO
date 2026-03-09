@@ -14,6 +14,8 @@ The foundation of any robust oversight model lies in the semantic density and st
 
 The full evaluation rubric is highly load-bearing; attempting to shortcut the evaluation by asking a model to simply output a JSON score without building context leads to dramatic drops in scoring accuracy.1 The full pipeline relies on intent analysis, indicator detection, and then scoring.1
 
+Crucially, by providing the LLM oversight agents with these detailed behavior trait directions alongside few-shot conversation threads, our goal is essentially replicating and estimating the target agent's internal configuration (akin to a ClawdBot's `SOUL.md`). In real-world scenarios, these internal system prompts and behavior guidelines can dynamically change and update themselves. While we rarely have direct visibility into a target agent's `SOUL.md`, combining detailed trait definitions with contextual conversational examples allows our models to accurately estimate and evaluate this hidden behavioral architecture.
+
 The following table delineates the core traits evaluated within the Ethos Academy framework, providing the structural basis for the reinforcement learning reward signals.
 
 | Dimensional Category | Specific Trait | Evaluative Focus | Applicability to GRPO Training |
@@ -242,6 +244,12 @@ The transition from raw, multi-turn conversation logs into an actionable dataset
 Furthermore, while the mathematical efficiency of GRPO removes the computational burden of a critic network, it transfers that burden onto the precise engineering of the reward functions. A model cannot learn the subtle nuances of deceptiveness, broken logic, or manipulation without a composite reward structure. This structure must enforce strict formatting for deductive processing before evaluating empirical accuracy via ground-truth comparisons or LLM-as-a-Judge mechanisms.
 
 Finally, relying solely on static text evaluation limits the operational reality of the oversight agent. By fusing the Unsloth-optimized TRL training loop with the standardized, isolated execution layers of OpenEnv on high-performance Northflank infrastructure, the project transitions from a localized script into a dynamic, production-ready system. Utilizing the Model Context Protocol within OpenEnv allows the oversight model to actively investigate claims, shifting the paradigm from passive reading to active auditing. This architectural blueprint not only fulfills the immediate requirements of evaluating the complex character traits defined by the Ethos Academy rubric but establishes a highly scalable foundation for future deployments in algorithmic governance and multi-agent safety protocols.
+
+## **Future Directions**
+
+Moving forward, the oversight architecture can be significantly scaled to tackle more complex multi-agent ecosystems. Future iterations will focus on training larger models over longer cycles to deepen the core model's analytical capabilities. To expand beyond initial dataset limitations, we plan to generate robust synthetic data using an LLM-based dojo environment and scrape additional multi-agent interactions from platforms like MoltBook. 
+
+This enhanced data pipeline will allow us to introduce more detailed behavioral traits, provided the larger parameter models can sustain the increased cognitive load. Furthermore, future architectures must introduce mechanisms for alignment tracking over time. As agents operate autonomously, they frequently begin to drift and alter their behavior—possibly by autonomously editing their own `SOUL.md` profiles under the influence of other bots and external actions. Ensuring oversight agents can detect, monitor, and adapt to these dynamic personality shifts will be a critical next step in algorithmic alignment.
 
 #### **Works cited**
 
