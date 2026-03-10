@@ -114,7 +114,7 @@ This mode is the first step of a broader effort ([#1](https://github.com/Eephor/
 
 ### Architecture overview
 
-The simulation environment currently operates in **mock-bot mode** ([#3](https://github.com/Eephor/DataMassageForGRPO/issues/3), complete). The participant abstraction is intentionally designed for a drop-in upgrade to **LLM-powered bots** ([#4](https://github.com/Eephor/DataMassageForGRPO/issues/4), upcoming — see [Roadmap](#roadmap) below).
+The simulation environment supports **mock-bot mode** ([#3](https://github.com/Eephor/DataMassageForGRPO/issues/3), complete) and **LLM-powered bot mode** ([#4](https://github.com/Eephor/DataMassageForGRPO/issues/4), complete — see [Roadmap](#roadmap) below). The `ParticipantBot` abstraction allows dropping in either historical re-enactments (`ReplayBot`) or autonomous generation (`LLMParticipantBot`) seamlessly.
 
 `simulation.py` introduces three components that replace the static data pipeline during training:
 
@@ -562,7 +562,7 @@ Each training step in LLM bot mode makes two LLM calls per conversation turn: on
 ### Roadmap
 
 1. **Mock-bot replay** ✅ ([#3](https://github.com/Eephor/DataMassageForGRPO/issues/3)) — `ReplayBot` + `ConversationEnvironment` replay historical messages turn-by-turn.
-2. **LLM-powered participant bots** 🔜 ([#4](https://github.com/Eephor/DataMassageForGRPO/issues/4)) — `LLMParticipantBot` + `OracleEvaluator` + `LLMConversationEnvironment` as described above.
+2. **LLM-powered participant bots** ✅ ([#4](https://github.com/Eephor/DataMassageForGRPO/issues/4)) — `LLMParticipantBot` + `OracleEvaluator` + `LLMConversationEnvironment` as described above.
 3. **Full multi-agent feedback loop** — the oversight agent's verdicts feed back into the environment, enabling reactive participant behaviour and closing the training loop.
 4. **Enhanced Synthetic Data Generation (Dojo)** — utilizing an LLM-based dojo and scraping further datasets from MoltBook to broaden test distributions.
 5. **Architectural Scaling & Trait Granularity** — scaling the base models to support deeper context windows and more granular trait evaluation points. 
